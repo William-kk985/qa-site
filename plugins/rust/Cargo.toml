@@ -1,0 +1,15 @@
+[package]
+name = "qa-plugin-example"
+version = "0.1.0"
+edition = "2021"
+
+# cdylib = 编成动态库。在 wasm32-unknown-unknown 这个 target 上，
+# 产物就是 .wasm（不是 .so）。
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"   # 体积优先（我们只做算术，不需要速度优化）
+lto = true
+strip = true
+panic = "abort"   # 去掉 panic 解栈，wasm 里也用不上

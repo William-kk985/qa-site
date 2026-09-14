@@ -1,0 +1,15 @@
+# 各语言的编译中间产物 —— 不要提交。
+# （prebuilt/ 是例外：那是编译好的成品，**要**提交，好让人不用装工具链就能下载试用。）
+
+# Rust
+rust/target/
+
+# TypeScript
+ts/.out/
+
+# ReScript
+rescript/lib/
+rescript/.rescript*
+
+# build.sh 的临时日志
+prebuilt/.*.log

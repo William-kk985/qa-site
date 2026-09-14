@@ -1,0 +1,6 @@
+{
+  "name": "qa-plugin-example",
+  "sources": [{ "dir": "src", "subdirs": true }],
+  "package-specs": [{ "module": "esmodule", "in-source": false }],
+  "suffix": ".mjs"
+}

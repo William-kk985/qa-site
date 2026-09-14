@@ -377,15 +377,25 @@
     <!-- ============ 插件（只对你自己生效） ============ -->
     <div id="theme-pane-plugin" class="hidden">
       <p class="hint" style="margin-bottom:10px">
-        上传一个 <code>.wasm</code>，用它替换站点里的<b>外观</b>或<b>排序算法</b>。
+        上传一个 <code>.wasm</code> 或 <code>.js</code>，用它替换站点里的<b>外观</b>或<b>排序算法</b>。
         <b>只存在你自己这个浏览器里，别人拿不到、也影响不到别人</b>；「一键还原」会一并清掉。
       </p>
 
       <div class="src-note">
         <b>约定 —— 任何语言 5 分钟就能实现</b>（数字进出，不用传字符串、不用管内存）：<br>
-        · <code>theme(i) → f64</code> —— 第 i 个外观槽位的值，<b>返回负数 = 这个槽位用站点默认</b><br>
-        · <code>hot_score(点赞, 回答, 浏览, 距今天数) → f64</code> —— 替换「热门」排序的打分<br>
-        两个都导出也行，<b>只实现一个也行</b>。想省事就直接点「下载示例插件」。
+        · <code>theme(i) → number</code> —— 第 i 个外观槽位的值，<b>返回负数 = 这个槽位用站点默认</b><br>
+        · <code>hot_score(点赞, 回答, 浏览, 距今天数) → number</code> —— 替换「热门」排序的打分<br>
+        两个都导出也行，<b>只实现一个也行</b>。
+      </div>
+
+      <div class="src-note" style="margin-top:8px">
+        <b>两种后端，ABI 一样</b><br>
+        · <code>.wasm</code> —— 能编 wasm 的语言：<b>MoonBit / C / C++ / Rust / Zig…</b><br>
+        &nbsp;&nbsp;跑在 wasm 沙箱里、零外部依赖，<b>碰不到页面</b>。<br>
+        · <code>.js</code> —— 只能编 JS 的语言：<b>TypeScript / ReScript / 手写 JS</b><br>
+        &nbsp;&nbsp;（tsc → .js，ReScript → .mjs，把编译产物传上来就行）<br>
+        &nbsp;&nbsp;⚠️ JS 是<b>跑在页面里</b>的，权限比 wasm 大得多 ——
+        <b>只传你自己写的 / 自己编译的</b>，别把别人发你的 <code>.js</code> 传进来。
       </div>
 
       <details class="theme-advanced">
@@ -395,12 +405,22 @@
 
       <p class="hint" id="plugin-status" style="margin:12px 0"></p>
 
+      <p class="hint" style="margin:0 0 6px">下载示例插件（各语言写法完全等价，随便挑一个试）：</p>
+      <div class="src-actions" style="margin-bottom:10px">
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/moonbit.wasm" download>MoonBit</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/rust.wasm" download>Rust</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/c.wasm" download>C</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/cpp.wasm" download>C++</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/typescript.js" download>TypeScript</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/rescript.mjs" download>ReScript</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/javascript.js" download>JS</a>
+      </div>
+
       <div class="src-actions">
-        <a class="btn btn-soft btn-sm" href="plugins/example.wasm" download>下载示例插件</a>
-        <button type="button" class="btn btn-soft btn-sm" data-action="plugin-pick">选择 .wasm 文件</button>
+        <button type="button" class="btn btn-soft btn-sm" data-action="plugin-pick">选择 .wasm / .js 文件</button>
         <button type="button" class="btn btn-reset btn-sm" data-action="plugin-clear">移除我的插件</button>
       </div>
-      <input type="file" id="plugin-file" accept=".wasm,application/wasm" class="hidden">
+      <input type="file" id="plugin-file" accept=".wasm,.js,.mjs,application/wasm,text/javascript" class="hidden">
     </div>
 
     <div class="modal-actions modal-actions-split">

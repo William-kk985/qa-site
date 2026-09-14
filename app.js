@@ -182,6 +182,7 @@ const THEME_DEFAULTS = {
   css: '',
   js: '',
   plugin: '',              // 你自己上传的 .wasm（base64）—— 只在你浏览器里生效
+  pluginJs: '',            // 或者你自己上传的 .js（源码原文）—— 和 plugin 二选一
   pluginName: '',
 };
 const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
@@ -1276,7 +1277,9 @@ function bytesToBase64(bytes) {
   return btoa(s);
 }
 
-const pluginBytes = () => (theme.plugin ? Math.round((theme.plugin.length * 3) / 4) : 0);
+const pluginBytes = () => theme.pluginJs
+  ? theme.pluginJs.length
+  : (theme.plugin ? Math.round((theme.plugin.length * 3) / 4) : 0);
 
 /* ============================================================================
    通用 JS 映射层：把「各语言编译出来的 wasm」返回的数字翻译成 CSS
@@ -1343,21 +1346,80 @@ function reorderThemeStyles() {
   });
 }
 
+/* ============================================================================
+   插件的两种后端：WASM 和 JS
+   ----------------------------------------------------------------------------
+   · WASM —— 任何能**编到 wasm** 的语言：MoonBit / Rust / C / C++ / Zig / …
+             跑在 wasm 沙箱里、零 import，碰不到页面，最安全。
+
+   · JS   —— **只能编成 JS** 的语言走这条：TypeScript（tsc）、ReScript、纯 JS…
+             上传编译产物即可，ABI 和 wasm 那边一模一样。
+
+             ⚠️ 但 JS 插件是**跑在页面里的**，能碰你的一切（登录态、数据、DOM）。
+                wasm 插件做不到这些。所以：只上传你自己写的 / 自己编译的 .js，
+                **别把别人发你的 .js 传进来** —— 那等于把账号交给对方。
+
+   两边的 ABI 完全相同：导出 theme(i) 和 / 或 hot_score(...)，数字进、数字出。
+   所以 app.js 后面那些调用点（wasmThemeToCss / heat）根本不关心插件是什么写的。
+   ============================================================================ */
+
+/* 当前插件的后端类型（判断"该按什么格式读"） */
+function pluginKind() {
+  return theme.pluginJs ? 'js' : theme.plugin ? 'wasm' : '';
+}
+
+/* 加载一个 JS 插件模块，返回它的导出对象。
+   两种模块格式都认：ES Module（tsc / ReScript 默认）和 CommonJS（部分工具链默认）。 */
+async function loadJsPlugin(src) {
+  let esmErr = null;
+
+  // ① 先按 ES Module 试
+  try {
+    const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    try {
+      const mod = await import(url);
+      if (typeof mod.theme === 'function' || typeof mod.hot_score === 'function') return mod;
+    } finally {
+      URL.revokeObjectURL(url);   // 模块已经求值完，URL 可以立刻释放
+    }
+  } catch (e) {
+    esmErr = e;
+  }
+
+  // ② 再按 CommonJS 试
+  try {
+    const mod = { exports: {} };
+    new Function('module', 'exports', src)(mod, mod.exports);
+    const c = mod.exports;
+    if (typeof c.theme === 'function' || typeof c.hot_score === 'function') return c;
+  } catch (_) { /* 两种都不行，下面统一报错 */ }
+
+  throw new Error(esmErr
+    ? '这个 .js 连加载都失败了：' + esmErr.message
+    : '这个 .js 里既没有导出 theme（外观），也没有导出 hot_score（排序）');
+}
+
 async function loadPlugins() {
   hotPlugin = null;
   themePlugin = null;
-  if (!theme.plugin) return;                 // 没上传 → 全用站点默认
 
   try {
-    const { instance } = await WebAssembly.instantiate(base64ToBytes(theme.plugin), {});
-    const ex = instance.exports;
+    let ex;
+    if (theme.pluginJs) {
+      ex = await loadJsPlugin(theme.pluginJs);
+    } else if (theme.plugin) {
+      ex = (await WebAssembly.instantiate(base64ToBytes(theme.plugin), {})).instance.exports;
+    } else {
+      return;                                  // 没上传 → 全用站点默认
+    }
 
     if (typeof ex.theme === 'function') themePlugin = ex.theme;
     if (typeof ex.hot_score === 'function') hotPlugin = ex.hot_score;
     if (!themePlugin && !hotPlugin) throw new Error('既没有导出 theme，也没有导出 hot_score');
 
     console.log('[插件] 已加载你自己上传的插件：' + (theme.pluginName || '未命名')
-      + '（提供 ' + [themePlugin && 'theme', hotPlugin && 'hot_score'].filter(Boolean).join(' + ') + '）');
+      + '（' + pluginKind() + '，提供 '
+      + [themePlugin && 'theme', hotPlugin && 'hot_score'].filter(Boolean).join(' + ') + '）');
   } catch (e) {
     console.warn('[插件] 你自己的插件加载失败，改用站点默认：', e.message);
   }
@@ -1384,13 +1446,14 @@ function renderPluginStatus() {
 
   if (provide.length) {
     const bytes = pluginBytes();
+    const size = bytes < 1024 ? bytes + ' 字节' : Math.round(bytes / 1024) + ' KB';
     el.innerHTML = '🔌 正在用<b>你自己上传的插件</b>：'
       + `<code>${esc(theme.pluginName || '未命名')}</code>`
-      + `（${bytes < 1024 ? bytes + ' 字节' : Math.round(bytes / 1024) + ' KB'}）`
+      + `（${pluginKind() === 'js' ? 'JS' : 'WASM'}，${size}）`
       + ` —— 它改的是：<b>${provide.join(' + ')}</b>。<b>只对你自己生效</b>。`;
   } else {
     el.innerHTML = '🔌 没上传插件，外观和热门排序都用<b>站点默认</b>。'
-      + '想试的话：点下面的「下载示例插件」，再「选择 .wasm 文件」把它传上来。';
+      + '想试的话：点下面的「下载示例插件」，再「选择 .wasm / .js 文件」把它传上来。';
   }
 }
 
@@ -1887,6 +1950,7 @@ document.addEventListener('click', async e => {
 
       case 'plugin-clear':
         theme.plugin = '';
+        theme.pluginJs = '';
         theme.pluginName = '';
         saveTheme();
         hotPlugin = null;
@@ -2268,24 +2332,43 @@ document.addEventListener('change', async e => {
   if (e.target.id === 'theme-scheme') { theme.scheme = e.target.value; applyTheme(); saveTheme(); }
   if (e.target.id === 'theme-density') { theme.density = e.target.value; applyTheme(); saveTheme(); }
 
-  /* 上传自己的 WASM 插件：先试实例化，能跑才存进本地 */
+  /* 上传自己的插件（.wasm 或 .js）：先试跑一遍，能跑才存进本地 */
   if (e.target.id === 'plugin-file') {
     const file = e.target.files && e.target.files[0];
     e.target.value = '';                       // 允许重复选同一个文件
     if (!file) return;
 
     if (file.size > 512 * 1024) {
-      toast('插件太大了，上限 512KB（本地上存储放不下）');
+      toast('插件太大了，上限 512KB（本地存储放不下）');
       return;
     }
+
+    /* 按扩展名分路：.js / .mjs 走 JS 后端，其它当 wasm。
+       ⚠️ wasm 头 4 个字节固定是 \0asm —— 顺手校验一下，
+          否则用户把 .js 改名成 .wasm 会拿到一句看不懂的编译错误。 */
+    const wantJs = /\.m?js$/i.test(file.name);
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const { instance } = await WebAssembly.instantiate(bytes, {});
-      const ex = instance.exports;
-      if (typeof ex.theme !== 'function' && typeof ex.hot_score !== 'function') {
-        throw new Error('这个 wasm 既没有导出 theme（外观），也没有导出 hot_score（排序）');
+      if (wantJs) {
+        const src = await file.text();
+        await loadJsPlugin(src);               // 试加载，不合格会抛错
+        theme.pluginJs = src;
+        theme.plugin = '';                     // 和 wasm 二选一
+      } else {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+        if (magic !== '\0asm') {
+          throw new Error('这不是 .wasm 文件（缺少 wasm 文件头）。'
+            + '如果它是编译出来的 JS，请把文件名改成 .js 再传');
+        }
+        const { instance } = await WebAssembly.instantiate(bytes, {});
+        const ex = instance.exports;
+        if (typeof ex.theme !== 'function' && typeof ex.hot_score !== 'function') {
+          throw new Error('这个 wasm 既没有导出 theme（外观），也没有导出 hot_score（排序）');
+        }
+        theme.plugin = bytesToBase64(bytes);
+        theme.pluginJs = '';
       }
-      theme.plugin = bytesToBase64(bytes);
+
       theme.pluginName = file.name;
       saveTheme();
       await loadPlugins();

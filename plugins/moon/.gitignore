@@ -1,4 +1,4 @@
-# MoonBit 的构建产物，不用提交（hot.wasm 由 build.sh 拷到上一层）
+# MoonBit 的构建产物，不用提交（build.sh 会把 example.wasm 拷到 ../prebuilt/）
 _build/
 .moon/
 target/

@@ -2,15 +2,20 @@
 
 这个目录是给**「不想写 JavaScript，但想给网站加东西」**的人准备的。
 
-原理：把逻辑编译成 **WebAssembly**（`.wasm`），在网站的 **「自定义外观」→「插件」** 页签里上传。
-**任何能编到 WASM 的语言都行** —— Rust、C/C++、Zig、AssemblyScript、MoonBit…
+把逻辑编译好，在网站的 **「自定义外观」→「插件」** 页签里上传就行。
+**支持 7 种语言**（写法完全等价，随便挑你会的那门）：
 
-目前有两个插件位，**可以只实现其中一个**：
+| 语言 | 编成什么 | 后端 | 示例源码 | 编译产物 |
+|---|---|---|---|---|
+| **MoonBit** | `.wasm` | wasm | `moon/example/example.mbt` | `prebuilt/moonbit.wasm` |
+| **Rust** | `.wasm` | wasm | `rust/src/lib.rs` | `prebuilt/rust.wasm` |
+| **C** | `.wasm` | wasm | `c/example.c` | `prebuilt/c.wasm` |
+| **C++** | `.wasm` | wasm | `cpp/example.cpp` | `prebuilt/cpp.wasm` |
+| **TypeScript** | `.js` | js | `ts/example.ts` | `prebuilt/typescript.js` |
+| **ReScript** | `.mjs` | js | `rescript/src/Example.res` | `prebuilt/rescript.mjs` |
+| **JavaScript** | 不用编 | js | `js/example.js` | `prebuilt/javascript.js` |
 
-| 插件位 | 导出函数 | 作用 |
-|---|---|---|
-| ① 外观 | `theme(i) -> f64` | **改整站长相**（颜色 / 圆角 / 宽度 / 字号…） |
-| ② 热门排序 | `hot_score(votes, answers, views, age_days) -> f64` | 替换「热门」标签的排序打分 |
+> `prebuilt/` 里的成品**已经提交进仓库** —— 你不装任何工具链也能点「下载示例插件」直接试用。
 
 ---
 
@@ -30,36 +35,22 @@
 
 ---
 
-## 为什么用「数字」当接口 —— 那个"通用 JS"在哪
+## 两种后端：`.wasm` 和 `.js`
 
-你可能会想：CSS 是文本，让 WASM 直接返回一段 CSS 字符串不是更自由？
+网站收两种插件，**ABI（接口约定）完全一样**，只是跑的地方不同：
 
-**能，但没必要，而且更麻烦。** 对比一下：
-
-| | 返回字符串 CSS | **返回数字槽位**（现在的做法） |
+| | `.wasm` | `.js` |
 |---|---|---|
-| WASM 侧要做什么 | 自己管线性内存：分配、写字节、返回指针+长度 | `return 152.0`，一行 |
-| 各语言难度 | 每种语言都要写内存胶水代码 | 任何语言都是"返回几个数字" |
-| 谁来管合法性 | 插件作者自己（写出非法 CSS 就烂界面） | **JS 统一夹范围**，越界自动收回来 |
-| 谁来管范围/单位 | 插件作者自己 | **JS 统一补 `px` / `%` / `hsl()`** |
-| 暗色模式适配 | 插件作者得自己处理 | JS 只输出变量，主题系统自己适配 |
+| 谁走这条 | 能编到 wasm 的语言：MoonBit / Rust / C / C++ / Zig… | 只能编成 JS 的语言：**TypeScript / ReScript** / 手写 JS |
+| 跑在哪 | **wasm 沙箱**，零外部依赖 | **页面里**，和其他脚本同权限 |
+| 能碰页面吗 | ❌ 碰不到（这正是它安全的原因） | ✅ DOM、网络、**你的登录态**，什么都能碰 |
+| 怎么加载 | `WebAssembly.instantiate()` | `Blob` + 动态 `import()` |
+| 大小 | 几百字节起 | 见下面的"体积"一节 |
 
-所以分工是：
-
-```
-你的 WASM（任何语言）          通用 JS 桥（app.js 里，全站共用一份）
-   theme(0) → 152.0       →      把 8 个数字夹到合法范围
-   theme(1) → 0.62        →      换算成 hsl(152 62% 42%) 这样的 CSS 值
-   theme(2) → 0.42        →      写成 :root { --primary: …; --radius: … }
-   theme(3) → 2.0         →      插到样式表里，全站生效
-   ……
-```
-
-**你只负责「算数字」，翻译成 CSS 由通用 JS 干。** 这就是为什么换语言几乎零成本 ——
-MoonBit 编的、Rust 编的、C 编的，`theme(i)` 出来都是同样的 `f64`，JS 那边一视同仁。
-
-> 想输出**任意 CSS**（不只是这 8 个槽位）也不需要插件 —— 「看源码」页签旁边那个
-> 自定义 CSS 输入框就是干这个的，直接写 CSS 更省事。
+> ### 🔒 一句必须记住的话
+> **只上传你自己写的 / 自己编译的 `.js`，别把别人发你的 `.js` 传进来。**
+> wasm 插件有沙箱兜着，最坏也就是算错数；JS 插件**没有沙箱** ——
+> 别人给的 `.js` 能让它读走你的登录态、拿你的名义发东西。
 
 ---
 
@@ -80,12 +71,51 @@ MoonBit 编的、Rust 编的、C 编的，`theme(i)` 出来都是同样的 `f64`
 ### 2. 导出固定的函数签名
 
 ```
-theme(i: f64) -> f64
-hot_score(votes: f64, answers: f64, views: f64, age_days: f64) -> f64
+theme(i) -> number
+hot_score(votes, answers, views, age_days) -> number
 ```
 
 **两个都导出可以，只导出一个也行**（另一个功能就用站点默认）。
 两个都没有的话，上传时会被拒，不会存进本地。
+
+---
+
+## 为什么接口是「数字」—— 那个通用 JS 桥在哪
+
+你可能会想：让插件直接返回一段 CSS 字符串不是更自由？
+
+**能，但没必要，而且更麻烦。** 对比一下：
+
+| | 返回字符串 CSS | **返回数字槽位**（现在的做法） |
+|---|---|---|
+| WASM 侧要做什么 | 自己管线性内存：分配、写字节、返回指针+长度 | `return 152.0`，一行 |
+| 各语言难度 | 每种语言都要写内存胶水代码 | 任何语言都是"返回几个数字" |
+| 谁来管合法性 | 插件作者自己（写出非法 CSS 就烂界面） | **JS 统一夹范围**，越界自动收回来 |
+| 谁来管单位 | 插件作者自己 | **JS 统一补 `px` / `%` / `hsl()`** |
+| 暗色模式适配 | 插件作者得自己处理 | JS 只输出 CSS 变量，主题系统自己适配 |
+
+所以分工是：
+
+```
+你的插件（任何语言，wasm 或 js）      通用 JS 桥（app.js 里，全站共用一份）
+   theme(0) → 152                      夹到合法范围
+   theme(1) → 0.62                     换算成 hsl(152 62% 42%)
+   theme(2) → 0.42            ───►     写成 :root { --primary: …; --radius: … }
+   theme(3) → 2                        按 CSS 优先级插进样式表，全站生效
+   ……
+```
+
+**你只负责「算数字」，翻译成 CSS 由通用 JS 干。** 这就是为什么换语言几乎零成本 ——
+MoonBit 编的、Rust 编的、TypeScript 编的，`theme(i)` 出来都是同样的数字，JS 那边一视同仁。
+
+> 想输出**任意 CSS**（不只是这 8 个槽位）也不需要写插件 —— 「看源码」页签旁边那个
+> 自定义 CSS 输入框就是干这个的，直接写 CSS 更省事。
+
+CSS 优先级链（后面的盖前面的）：
+
+```
+站点默认  <  外观参数  <  插件生成的外观  <  你自己的自定义 CSS  <  自定义 JS
+```
 
 ---
 
@@ -108,15 +138,15 @@ hot_score(votes: f64, answers: f64, views: f64, age_days: f64) -> f64
 
 1. **返回负数或 `NaN` = 这个槽位用站点默认值** → 所以你可以只改想改的那几个，别的写 `-1.0` 就行。
 2. **越界的值会被夹回来**（比如圆角返回 `999`，实际按 `24` 用）→ 界面不会被搞烂。
-3. 主题色是 **HSL** 三个槽位拼出来的（`hsl(色相 饱和度% 亮度%)`），
+3. 主题色由 **HSL** 三个槽位拼出来（`hsl(色相 饱和度% 亮度%)`），
    `--primary-soft`（那种淡淡的背景色）也会跟着自动算 —— 你不用管。
 
-> 这个表在网页上也有（「插件」页签里），而且**是从代码里直接渲染的**，
+> 这个表在网页上也有（「插件」页签里），而且**是从代码里的 `THEME_SLOTS` 直接渲染的**，
 > 不会出现"文档和实现不一致"。以网页上那份为准。
 
 色相速查：`0` 红 / `30` 橙 / `60` 黄 / `120` 绿 / `152` 森林绿 / `190` 青 / `220` 蓝 / `270` 紫 / `330` 粉。
 
-### 插件②：`hot_score(votes, answers, views, age_days)`
+## 插件②：`hot_score(votes, answers, views, age_days)`
 
 | 参数 | 含义 |
 |---|---|
@@ -141,70 +171,46 @@ q.votes * 3 + q.answerCount * 5 + q.views / 100
 ```
 
 **你的插件可以跟它不一样** —— 那是你的自由，反正只影响你自己。
-（这也是为什么插件不要求"和默认公式一致"：它不再是"无缝替换"，而是"你自己的实验"。）
 
 ---
 
-## 已经有的示例：MoonBit 版
+## 各语言怎么写
+
+下面的示例**语义完全一样**（都改森林绿 + 直角 + 宽版面 + 热门带时间衰减），
+这样你可以直接横着比。7 种语言编出来的产物，`bash plugins/build.sh` 会验证它们
+**输出逐位完全相同**。
+
+### MoonBit
 
 ```bash
-bash plugins/build.sh          # 需要先装 MoonBit 工具链（moon version 能跑通）
+moon build --target wasm --release      # 或直接 bash plugins/build.sh
 ```
 
-产物 `plugins/example.wasm` **只有几百字节**、零外部依赖、**两个函数都导出**：
+```moonbit
+#export_name("theme")
+pub fn theme(index : Int) -> Double {
+  if index == 0 { 152.0 } else if index == 1 { 0.62 } else { -1.0 }
+}
+```
 
-- **外观**：改成森林绿（色相 152）、接近直角（圆角 2px）、更宽的版面（1240px）、更大的字号（17px）
-- **热门**：在默认公式上加了**时间衰减**（`÷(1 + 天数/30)`，防止老帖永远占榜首）
+> ⚠️ MoonBit 有个必踩的坑：`moon.pkg` 里必须写 `pkgtype(kind: "foreign_library")`，
+> 否则 `#export_name` 会报错。好消息是它的报错很直白，会直接告诉你加这句。
 
-源码在 `moon/example/example.mbt`，两个函数加起来 20 行。
-
-**怎么用**：打开网站 → 顶部 🎨 → 「插件」页签 → 「下载示例插件」→ 「选择 .wasm 文件」上传它。
-上传后你能同时看到**配色变了**和**热门排序变了**；点「移除我的插件」立刻回到原样。
-
-> MoonBit 的关键点：`moon.pkg` 里必须写 `pkgtype(kind: "foreign_library")`，
-> 否则 `#export_name` 会报错（MoonBit 的报错很直白，会告诉你加这句）。
-
-## 想用 Rust 写一个？
-
-Rust 走 `wasm32-unknown-unknown`：
+### Rust
 
 ```bash
-rustup target add wasm32-unknown-unknown
-cargo new --lib my-plugin && cd my-plugin
+rustup target add wasm32-unknown-unknown     # 只需一次
+cd plugins/rust && cargo build --release --target wasm32-unknown-unknown
+# 产物：target/wasm32-unknown-unknown/release/qa_plugin_example.wasm
 ```
 
-`Cargo.toml`：
+三个关键点（少一个都编不出能用的插件）：
 
-```toml
-[lib]
-crate-type = ["cdylib"]
-
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true
-```
-
-`src/lib.rs`：
+1. `Cargo.toml` 里 `crate-type = ["cdylib"]` —— 否则编不出 `.wasm`
+2. `#[no_mangle]` —— 否则 Rust 会做 name mangling，导出的名字就不是 `theme` 了
+3. `extern "C"` —— 用 C 的调用约定，和 wasm 的 f64 ABI 对齐
 
 ```rust
-/// 外观：8 个槽位，负数 = 用站点默认值
-#[no_mangle]
-pub extern "C" fn theme(i: f64) -> f64 {
-    match i as i32 {
-        0 => 220.0,   // 色相：蓝
-        1 => 0.85,    // 饱和度
-        2 => 0.50,    // 亮度
-        3 => 16.0,    // 圆角 px
-        4 => 1100.0,  // 页面最大宽度 px
-        5 => 16.0,    // 正文字号 px
-        6 => 20.0,    // 卡片内边距 px
-        7 => 14.0,    // 列表间距 px
-        _ => -1.0,    // 其余槽位用默认
-    }
-}
-
-/// 热门排序：可以只写这一个，不写 theme 也行
 #[no_mangle]
 pub extern "C" fn hot_score(votes: f64, answers: f64, views: f64, age_days: f64) -> f64 {
     let base = votes * 3.0 + answers * 5.0 + views / 100.0;
@@ -212,63 +218,195 @@ pub extern "C" fn hot_score(votes: f64, answers: f64, views: f64, age_days: f64)
 }
 ```
 
+### C
+
+**不需要 wasi-sdk** —— 我们的 ABI 是纯数字，`-nostdlib` 就够，只要有个 `wasm-ld`：
+
 ```bash
-cargo build --release --target wasm32-unknown-unknown
-# 然后把这个文件传到网站的「插件」页签里：
-#   target/wasm32-unknown-unknown/release/my_plugin.wasm
+clang --target=wasm32 -nostdlib -O2 \
+      -Wl,--no-entry -Wl,--export=theme -Wl,--export=hot_score \
+      -o prebuilt/c.wasm c/example.c
 ```
 
-> Rust 编出来会比 MoonBit 大不少（几 KB 到几十 KB），因为带了 std 的痕迹。
-> 想更小可以加 `#![no_std]`，但那样就得自己处理浮点格式化。
+```c
+__attribute__((export_name("hot_score")))
+double hot_score(double votes, double answers, double views, double age_days) {
+  double base = votes * 3.0 + answers * 5.0 + views / 100.0;
+  return base / (1.0 + age_days / 30.0);
+}
+```
+
+> ⚠️ **Ubuntu 上 clang 和 wasm-ld 是分开的两个包。**
+> 只装 `clang` 会得到一句 `Executable "wasm-ld-14" doesn't exist!`：
 >
-> ⚠️ 上面这段 Rust 代码**没有在本机验证过**（这台机器的 Rust 是 snap 版，跑不起来），
-> 是按标准写法给的。第一次跑如果有问题，多半是 crate-type 或 target 没配。
+> ```bash
+> sudo apt install clang lld        # lld 就是提供 wasm-ld 的那个包
+> ```
+>
+> **没有 root 权限**也能搞定 —— 去 Ubuntu archive 下 `lld-14_*.deb`，
+> `dpkg-deb -x` 解开就有 `wasm-ld`（在 `usr/lib/llvm-14/bin/` 里）。
+> 然后告诉 clang 去哪找它（clang 14 不认 `--ld-path`，得用 `-B`）：
+>
+> ```bash
+> clang --target=wasm32 -nostdlib -O2 -B<解开的目录>/usr/lib/llvm-14/bin ...
+> ```
+>
+> 我们的 `build.sh` 支持用 `WASM_LD_DIR=<那个目录>` 环境变量传进去。
 
-## 用别的语言也行？
+### C++
 
-只要满足「**导出 `theme` 或 `hot_score`，f64 进 f64 出，不依赖 WASI**」就行：
+和 C 一样，但**必须加 `extern "C"`**：
 
-| 语言 | 关键步骤 |
-|---|---|
-| **C / C++** | `clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export=theme -Wl,--export=hot_score` |
-| **Zig** | `zig build-lib -target wasm32-freestanding -dynamic -rdynamic`，函数加 `export` |
-| **AssemblyScript** | `asc example.ts --exportRuntime false -O3`，函数加 `export function` |
-| **MoonBit** | 见上面的 `build.sh` |
+```cpp
+extern "C" __attribute__((export_name("theme")))
+double theme(int i) { /* ... */ }
+```
 
-> 这些语言返回的是 `f64`，跟 `theme`/`hot_score` 的签名天然对得上 ——
-> 只有 `i` 那个参数是整数语义，按 `i as i32` 比较即可。
+> 不加 `extern "C"` 的话，C++ 会做 name mangling，导出的名字变成 `_Z5themei` 这种，
+> 插件约定就对不上了。
+>
+> 另外别用 `iostream` / `std::string` —— 它们要 libc++，`-nostdlib` 下链不上。
+> 纯数字运算用不上它们。
+
+### TypeScript
+
+> ⚠️ **TypeScript 不能直接编成 wasm。**
+> （[AssemblyScript](https://www.assemblyscript.org/) 长得像 TS，但它是另一门语言。）
+> 所以 TS 走的是 **JS 后端**：
+
+```bash
+npm install typescript
+tsc example.ts --target es2020 --module es2020    # → example.js，传这个
+```
+
+```ts
+export function theme(i: number): number { /* ... */ }
+export function hot_score(votes: number, answers: number, views: number, ageDays: number): number {
+  return (votes * 3 + answers * 5 + views / 100) / (1 + ageDays / 30);
+}
+```
+
+用 `export function` 导出（ES Module）。网站也兼容 CommonJS 的 `module.exports`，
+但 ESM 是推荐写法。
+
+### ReScript
+
+同样编成 JS，所以也走 **JS 后端**：
+
+```bash
+npm install rescript
+cd plugins/rescript && rescript build       # 产物在 lib/es6/src/Example.mjs
+```
+
+```rescript
+@export
+let hot_score = (votes: float, answers: float, views: float, ageDays: float): float => {
+  let base = votes *. 3.0 +. answers *. 5.0 +. views /. 100.0
+  base /. (1.0 +. ageDays /. 30.0)
+}
+```
+
+> ReScript 里浮点运算要写成 `+.` `*.` `/.`（带点），整数才是 `+` `*` `/`。
+> 写错了编译器会直接报类型错，不会默默算错 —— 这是好事。
+
+### JavaScript
+
+不用编译，`js/example.js` 直接传上去就行。用来对照"TS / ReScript 编出来大概长什么样"。
 
 ---
 
-## 怎么验证自己编出来的对不对
-
-上传前先用 Node 检查一下，省得传上去才发现不对：
+## 一把梭：`build.sh`
 
 ```bash
-node -e "
-  const fs = require('fs');
-  const m = new WebAssembly.Module(fs.readFileSync('plugins/example.wasm'));
-  console.log('导出：', WebAssembly.Module.exports(m).map(e => e.kind + ':' + e.name).join(', '));
-  console.log('依赖：', WebAssembly.Module.imports(m).length ? '有依赖（不行，应该是 0）' : '无 ✅');
-  const i = new WebAssembly.Instance(m, {});
-  const slots = [0,1,2,3,4,5,6,7].map(k => i.exports.theme(k));
-  console.log('theme 槽位 0–7 =', slots.join(', '));
-  console.log('hot_score(1,2,100,3) =', i.exports.hot_score(1, 2, 100, 3));
-"
+bash plugins/build.sh              # 编全部能编的
+bash plugins/build.sh c rust ts    # 只编指定语言
 ```
 
-示例插件的参考值：8 个槽位是 `152, 0.62, 0.42, 2, 1240, 17, 22, 16`；
-`hot_score(1,2,100,3) = (1*3 + 2*5 + 100/100) / (1 + 3/30) = 12.727272727272727`。
+**装了哪个语言就编哪个，没装的跳过并告诉你怎么装** —— 不会中途失败。
 
-## 怎么知道网站有没有用上我的插件
+工具链不在 PATH 里时用环境变量指路：
 
-打开 🎨 → 「插件」页签，那里会写：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MOON` | `moon` | MoonBit 编译器 |
+| `CLANG` / `CLANGXX` | `clang` / `clang++` | C / C++ 编译器 |
+| `WASM_LD_DIR` | 空 | 放着 `wasm-ld` 的目录（clang 14 需要 `-B` 指路） |
+| `CARGO` | `cargo` | Rust |
+| `TSC` | `tsc` | TypeScript 编译器 |
+| `RESCRIPT` | `rescript` | ReScript 编译器 |
 
-> 🔌 正在用**你自己上传的插件**：`example.wasm`（n 字节，只对你自己生效）
-> 提供：外观（theme）+ 热门排序（hot_score）
+编完会自动跑一遍校验（下面这个）：
+`✅ 7 个插件全部合规，且跨语言输出一致`
 
-如果写的是「没上传插件」，说明插件没加载成功 ——
-上传时会有提示，也可以打开 F12 控制台看警告（`[插件] ...`）。
+## 校验：`verify.mjs`
+
+```bash
+node plugins/verify.mjs
+```
+
+它把 `prebuilt/` 下**所有语言编出来的**插件都加载一遍，检查：
+
+1. 每个都合规：导出 `theme` / `hot_score`、**零外部依赖**、槽位值在范围内
+2. 所有语言**输出逐位相同** —— 这才是"换语言零成本"的真正证据
+
+```
+  语言/文件           后端     体积        槽位 0–3                    hot_score(1,2,100,3)
+  ────────────────────────────────────────────────────────────────────────────
+  c               wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
+  cpp             wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
+  javascript      js     2329 B    152, 0.62, 0.42, 2        12.727272727272727
+  moonbit         wasm   473 B     152, 0.62, 0.42, 2        12.727272727272727
+  rescript        js     590 B     152, 0.62, 0.42, 2        12.727272727272727
+  rust            wasm   274 B     152, 0.62, 0.42, 2        12.727272727272727
+  typescript      js     2870 B    152, 0.62, 0.42, 2        12.727272727272727
+
+  以 c 为基准，比对另外 6 个：
+    ✅ cpp 与基准逐位相同
+    ✅ javascript 与基准逐位相同
+    ✅ moonbit 与基准逐位相同
+    ✅ rescript 与基准逐位相同
+    ✅ rust 与基准逐位相同
+    ✅ typescript 与基准逐位相同
+
+  ✅ 所有语言编译出来的插件，输出**逐位完全相同**
+```
+
+### 体积参考（实测）
+
+同一份逻辑，各语言编出来的体积差 10 倍。**都不用为体积挑语言**（上限是 512KB）：
+
+| 语言 | 实测 | 为什么 |
+|---|---|---|
+| **Rust** | **274 B** | 最小。`opt-level="z"` + `lto` + `strip` + `panic="abort"` 把能砍的都砍了 |
+| C / C++ | 386 B | 直接编机器码，没有运行时 |
+| MoonBit | 473 B | 同样很干净 |
+| ReScript | 590 B | 是 JS，注释被编译器丢掉了，所以比手写那份还小 |
+| JavaScript | 2329 B | 是 JS，**注释原样保留**（源码里全是讲解） |
+| TypeScript | 2870 B | 同上，而且 tsc 默认也不删注释（`removeComments: false`） |
+
+> 两个 JS 版本"体积大"纯粹是因为**带了一堆注释**。
+> 真在意的话在 `tsconfig.json` 里开 `removeComments: true` 就掉到几百字节 ——
+> 但示例里那些注释是给人看的，故意留着。
+
+---
+
+## 怎么用网站上传
+
+打开网站 → 顶部 🎨 → 「插件」页签 → 选一个语言的「下载示例插件」→
+「选择 .wasm / .js 文件」把它传上来。
+
+上传时会**先试跑一遍**，通过才存进本地：
+
+1. `.wasm`：先看文件头是不是 `\0asm`（不是就提示"这不是 .wasm 文件"），再试着实例化
+2. `.js`：先试 ES Module 加载，不行再试 CommonJS
+3. `theme` 和 `hot_score` 一个都没有 → 拒绝，不会存
+4. 大小上限 512KB
+5. 通过后存进 `localStorage`，立刻生效
+
+上传后状态行会写清楚是哪个后端在干活：
+
+> 🔌 正在用**你自己上传的插件**：`javascript.js`（JS，2329 字节）
+> —— 它改的是：**外观（theme） + 热门排序（hot_score）**。**只对你自己生效**。
 
 ---
 
