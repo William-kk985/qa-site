@@ -181,6 +181,8 @@ const THEME_DEFAULTS = {
   density: 'comfortable',  // comfortable | compact | loose
   css: '',
   js: '',
+  plugin: '',              // 你自己上传的 .wasm（base64）—— 只在你浏览器里生效
+  pluginName: '',
 };
 const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
                        '#dc2626', '#db2777', '#7c3aed', '#475569'];
@@ -331,11 +333,19 @@ function openTheme() {
   $('#theme-mask').classList.remove('hidden');
 
   // 恢复上次看的页签
+  switchThemePane();
+  if (ui.themeTab === 'source') renderSrc();
+  if (ui.themeTab === 'plugin') renderPluginStatus();
+}
+
+/* 统一切换外观面板里的三个页签 */
+function switchThemePane() {
   $$('[data-action="theme-tab"]').forEach(t =>
     t.classList.toggle('is-active', t.dataset.tab === ui.themeTab));
-  $('#theme-pane-basic').classList.toggle('hidden', ui.themeTab !== 'basic');
-  $('#theme-pane-source').classList.toggle('hidden', ui.themeTab !== 'source');
-  if (ui.themeTab === 'source') renderSrc();
+  ['basic', 'source', 'plugin'].forEach(k => {
+    const el = $('#theme-pane-' + k);
+    if (el) el.classList.toggle('hidden', ui.themeTab !== k);
+  });
 }
 
 function closeTheme() { $('#theme-mask').classList.add('hidden'); }
@@ -1210,50 +1220,81 @@ function renderMembers() {
   }).join('') : '<div class="faint" style="font-size:13px;padding:14px 0">没有符合条件的成员。</div>';
 }
 
-/* ------------------------------ WASM 插件位 ------------------------------
-   任何能编译到 WebAssembly 的语言，都可以往 plugins/ 里丢一个 .wasm，
-   替换掉网站里某个纯计算函数。约定见 plugins/README.md。
+/* --------------------- WASM 插件位（**只对你自己生效**） ---------------------
+   任何能编译到 WebAssembly 的语言都可以写一个「纯计算函数」来替换站点的默认实现。
 
-   当前插件：plugins/hot.wasm（MoonBit 编译，几百字节）→ 热门排序打分
+   ⚠️ 关键设计：插件**存在你自己浏览器的 localStorage 里**（跟外观设置放一起）——
+      · 别人拿不到，也影响不到别人
+      · 换设备 / 换浏览器要重新上传
+      · 「一键还原」会一并清掉
 
-   ⚠️ 三条铁律：
-     · 插件是**可选**的：加载失败 / 文件不存在 → 回落到下面的 JS 实现
-     · 插件里的公式必须和 JS 兜底**完全一致**（不然有无插件排序结果不同）
-     · 插件只做纯计算：数字进、数字出，不碰 DOM、不碰网络
-   ---------------------------------------------------------------------- */
+   站点**默认不加载任何插件**，走下面的 JS 公式 —— 所以别人看到的行为永远不变。
+   ⚠️ 别把 .wasm 提交进仓库当默认插件：那会变成"改一次所有人受影响"。
+     仓库里的 plugins/ 只是**示例源码**，给人下载了上传用的。
+
+   可替换的：热门排序打分 hot_score(点赞, 回答, 浏览, 距今天数) -> 热度分
+   约定见 plugins/README.md
+   ------------------------------------------------------------------------- */
 let hotPlugin = null;
 
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+const pluginBytes = () => (theme.plugin ? Math.round((theme.plugin.length * 3) / 4) : 0);
+
 async function loadPlugins() {
+  hotPlugin = null;
+  if (!theme.plugin) return;                 // 没上传 → 用站点默认
+
   try {
-    const res = await fetch('plugins/hot.wasm', { cache: 'no-cache' });
-    if (!res.ok) return;                    // 没有这个文件就静默跳过，用 JS
-    const { instance } = await WebAssembly.instantiate(await res.arrayBuffer(), {});
-    if (typeof instance.exports.hot_score === 'function') {
-      hotPlugin = instance.exports.hot_score;
-      console.log('[插件] plugins/hot.wasm 已加载（MoonBit 编译），热门排序用它算');
+    const { instance } = await WebAssembly.instantiate(base64ToBytes(theme.plugin), {});
+    if (typeof instance.exports.hot_score !== 'function') {
+      throw new Error('这个 wasm 没有导出 hot_score');
     }
+    hotPlugin = instance.exports.hot_score;
+    console.log('[插件] 已加载你自己上传的插件：' + (theme.pluginName || '未命名'));
   } catch (e) {
-    console.warn('[插件] plugins/hot.wasm 加载失败，热门排序用 JS 兜底：', e.message);
+    console.warn('[插件] 你自己的插件加载失败，改用站点默认：', e.message);
   }
 }
 
 function renderPluginStatus() {
   const el = $('#plugin-status');
   if (!el) return;
-  el.innerHTML = hotPlugin
-    ? '🔌 热门排序正在用 <b>WASM 插件</b>（<code>plugins/hot.wasm</code>，MoonBit 编译）。'
-    : '🔌 没加载到 WASM 插件，热门排序用的是 <b>JS 兜底实现</b>（功能一样，只是没用上插件）。';
+
+  if (hotPlugin) {
+    const kb = pluginBytes();
+    el.innerHTML = '🔌 热门排序正在用 <b>你自己上传的插件</b>：'
+      + `<code>${esc(theme.pluginName || '未命名')}</code>`
+      + `（${kb < 1024 ? kb + ' 字节' : Math.round(kb / 1024) + ' KB'}，<b>只对你自己生效</b>）`;
+  } else {
+    el.innerHTML = '🔌 没上传插件，热门排序用的是<b>站点默认公式</b>。'
+      + '想试的话：点下面的「下载示例插件」，再「选择 .wasm 文件」把它传上来。';
+  }
 }
 
 /* ------------------------------ 页面：列表 ------------------------------ */
 
-/* 热门排序打分：优先用 WASM 插件，插件没了就用这段 JS —— 两边公式必须一致 */
+/* 热门排序打分：上传了插件就用插件，否则用站点默认公式。
+   注意：**站点默认必须保持不变**，否则没上传插件的人也会受影响。 */
 function heat(q) {
-  const ageDays = (Date.now() - q.createdAt) / 86400000;
   if (hotPlugin) {
-    try { return hotPlugin(q.votes, q.answerCount, q.views, ageDays); } catch (_) { /* 掉下去用 JS */ }
+    try {
+      return hotPlugin(q.votes, q.answerCount, q.views,
+        (Date.now() - q.createdAt) / 86400000);
+    } catch (_) { /* 插件报错就掉回默认 */ }
   }
-  return (q.votes * 3 + q.answerCount * 5 + q.views / 100) / (1 + ageDays / 30);
+  return q.votes * 3 + q.answerCount * 5 + q.views / 100;
 }
 
 function tagCounts() {
@@ -1707,11 +1748,9 @@ document.addEventListener('click', async e => {
 
       case 'theme-tab': {
         ui.themeTab = el.dataset.tab;
-        $$('[data-action="theme-tab"]').forEach(t =>
-          t.classList.toggle('is-active', t.dataset.tab === ui.themeTab));
-        $('#theme-pane-basic').classList.toggle('hidden', ui.themeTab !== 'basic');
-        $('#theme-pane-source').classList.toggle('hidden', ui.themeTab !== 'source');
+        switchThemePane();
         if (ui.themeTab === 'source') await renderSrc();
+        if (ui.themeTab === 'plugin') renderPluginStatus();
         break;
       }
 
@@ -1730,6 +1769,20 @@ document.addEventListener('click', async e => {
         toast('已载入线上原版，可以开始改了');
         break;
       }
+
+      case 'plugin-pick':
+        $('#plugin-file').click();
+        break;
+
+      case 'plugin-clear':
+        theme.plugin = '';
+        theme.pluginName = '';
+        saveTheme();
+        hotPlugin = null;
+        renderPluginStatus();
+        await route();
+        toast('已移除你自己的插件，回到站点默认');
+        break;
 
       case 'src-selector': {
         const h = SELECTOR_HELP[Number(el.dataset.i)];
@@ -2098,9 +2151,37 @@ document.addEventListener('input', e => {
   saveTheme();
 });
 
-document.addEventListener('change', e => {
+document.addEventListener('change', async e => {
   if (e.target.id === 'theme-scheme') { theme.scheme = e.target.value; applyTheme(); saveTheme(); }
   if (e.target.id === 'theme-density') { theme.density = e.target.value; applyTheme(); saveTheme(); }
+
+  /* 上传自己的 WASM 插件：先试实例化，能跑才存进本地 */
+  if (e.target.id === 'plugin-file') {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';                       // 允许重复选同一个文件
+    if (!file) return;
+
+    if (file.size > 512 * 1024) {
+      toast('插件太大了，上限 512KB（本地上存储放不下）');
+      return;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const { instance } = await WebAssembly.instantiate(bytes, {});
+      if (typeof instance.exports.hot_score !== 'function') {
+        throw new Error('这个 wasm 没有导出 hot_score 函数');
+      }
+      theme.plugin = bytesToBase64(bytes);
+      theme.pluginName = file.name;
+      saveTheme();
+      await loadPlugins();
+      renderPluginStatus();
+      await route();
+      toast('插件已加载 —— 只对你自己生效');
+    } catch (err) {
+      toast('插件加载失败：' + err.message);
+    }
+  }
 });
 
 /* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */

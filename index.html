@@ -278,6 +278,7 @@
       <div class="tabs">
         <button type="button" class="tab is-active" data-action="theme-tab" data-tab="basic">外观</button>
         <button type="button" class="tab" data-action="theme-tab" data-tab="source">看源码</button>
+        <button type="button" class="tab" data-action="theme-tab" data-tab="plugin">插件</button>
       </div>
     </div>
     <p class="modal-sub">
@@ -361,7 +362,6 @@
 
       <div class="tabs" id="src-tabs"></div>
       <div class="src-note" id="src-note"></div>
-      <p class="hint" id="plugin-status" style="margin-bottom:8px"></p>
       <div class="src-pickers hidden" id="src-pickers"></div>
 
       <textarea id="src-editor" spellcheck="false"></textarea>
@@ -372,6 +372,29 @@
         <button type="button" class="btn btn-soft btn-sm" data-action="src-copy">复制全部</button>
         <span class="faint" id="src-status"></span>
       </div>
+    </div><!-- /#theme-pane-source -->
+
+    <!-- ============ 插件（只对你自己生效） ============ -->
+    <div id="theme-pane-plugin" class="hidden">
+      <p class="hint" style="margin-bottom:10px">
+        这里可以上传一个 <code>.wasm</code>，用它替换站点里的某个计算函数（目前是「热门排序」的打分）。
+        <b>只存在你自己这个浏览器里，别人拿不到、也影响不到别人</b>；「一键还原」会一并清掉。
+      </p>
+
+      <div class="src-note">
+        可替换的函数：<code>hot_score(点赞, 回答, 浏览, 距今天数) -&gt; 热度分</code><br>
+        任何能编译到 WebAssembly 的语言都行（MoonBit / Rust / C / Zig…）。
+        仓库的 <code>plugins/README.md</code> 里有完整示例，想省事就点「下载示例插件」拿个现成的。
+      </div>
+
+      <p class="hint" id="plugin-status" style="margin:12px 0"></p>
+
+      <div class="src-actions">
+        <a class="btn btn-soft btn-sm" href="plugins/hot.wasm" download>下载示例插件</a>
+        <button type="button" class="btn btn-soft btn-sm" data-action="plugin-pick">选择 .wasm 文件</button>
+        <button type="button" class="btn btn-reset btn-sm" data-action="plugin-clear">移除我的插件</button>
+      </div>
+      <input type="file" id="plugin-file" accept=".wasm,application/wasm" class="hidden">
     </div>
 
     <div class="modal-actions modal-actions-split">
