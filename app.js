@@ -71,8 +71,11 @@ function explain(e) {
     return { title: '这个邮箱已经注册过了', detail: '切到「登录」直接进。' };
   if (m.includes('password should be at least'))
     return { title: '密码太短', detail: '至少要 6 位。' };
+  if (m.includes('over_email_send_rate_limit') || m.includes('email rate limit'))
+    return { title: '发邮件的额度用完了',
+      detail: '免费版内置的发信服务每小时只能发几封邮件，等一小时再试。想稳定收到，按 README 配一个自己的 SMTP（比如 QQ 邮箱）。' };
   if (m.includes('rate limit') || m.includes('too many'))
-    return { title: '操作太频繁了', detail: '等几分钟再试（免费版发邮件也有额度限制）。' };
+    return { title: '操作太频繁了', detail: '等几分钟再试。' };
   if (m.includes('row-level security') || m.includes('permission denied') || m.includes('violates row-level'))
     return { title: '没有权限做这件事', detail: '可能是登录状态过期了，退出后重新登录一次。' };
   if (m.includes('failed to fetch') || m.includes('networkerror') || m.includes('load failed'))
@@ -339,6 +342,36 @@ function openProfile() {
 }
 
 function closeProfile() { $('#profile-mask').classList.add('hidden'); }
+
+/* --------------------------- 找回密码 / 设置新密码 ---------------------------
+   一个弹窗两种模式：
+     'request' —— 填邮箱，发重置邮件（登录页的「忘记密码？」）
+     'set'     —— 填新密码（点了邮件里的链接之后，或已登录时想改密码）
+   -------------------------------------------------------------------------- */
+let resetMode = 'request';
+
+function openReset(mode = 'request') {
+  resetMode = mode;
+  const setMode = mode === 'set';
+
+  $('#reset-title').textContent = setMode ? '设置新密码' : '找回密码';
+  $('#reset-sub').textContent = setMode
+    ? '输入新密码，保存之后就用它登录。'
+    : '填注册时用的邮箱，我们会发一封带重置链接的邮件给你。';
+  $('#reset-email-field').classList.toggle('hidden', setMode);
+  $('#reset-pass-field').classList.toggle('hidden', !setMode);
+  $('#reset-submit').textContent = setMode ? '保存新密码' : '发送重置邮件';
+  $('#reset-error').classList.add('hidden');
+  $('#reset-ok').classList.add('hidden');
+  $('#reset-mask').classList.remove('hidden');
+
+  setTimeout(() => {
+    const el = $(setMode ? '#reset-form [name=password]' : '#reset-form [name=email]');
+    if (el) el.focus();
+  }, 30);
+}
+
+function closeReset() { $('#reset-mask').classList.add('hidden'); }
 
 /* ------------------------------ 页面：列表 ------------------------------ */
 const heat = q => q.votes * 3 + q.answerCount * 5 + q.views / 100;
@@ -670,7 +703,17 @@ document.addEventListener('click', async e => {
         break;
 
       case 'close-modal':
+        closeAuth(); closeProfile(); closeReset();
+        break;
+
+      case 'forgot':
         closeAuth();
+        openReset('request');
+        break;
+
+      case 'change-password':
+        closeProfile();
+        openReset('set');
         break;
 
       case 'auth-mode':
@@ -751,6 +794,10 @@ $('#modal-mask').addEventListener('click', e => {
 
 $('#profile-mask').addEventListener('click', e => {
   if (e.target.id === 'profile-mask') closeProfile();
+});
+
+$('#reset-mask').addEventListener('click', e => {
+  if (e.target.id === 'reset-mask') closeReset();
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
@@ -843,6 +890,50 @@ document.addEventListener('submit', async e => {
     return;
   }
 
+  /* 找回密码 / 修改密码 */
+  if (form.id === 'reset-form') {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const errEl = $('#reset-error');
+    const okEl = $('#reset-ok');
+    const btn = $('#reset-submit');
+    const original = btn.textContent;
+
+    errEl.classList.add('hidden');
+    okEl.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = '处理中…';
+
+    try {
+      if (resetMode === 'request') {
+        const email = String(fd.get('email') || '').trim();
+        const { error } = await sb.auth.resetPasswordForEmail(email, {
+          redirectTo: location.origin + location.pathname,
+        });
+        if (error) throw error;
+        okEl.textContent = '邮件已发送。去收件箱（也翻一下垃圾箱）点里面的链接，就能设置新密码了。'
+          + '几分钟内没收到的话，多半是免费版发信额度被限了，应急办法见 README。';
+        okEl.classList.remove('hidden');
+      } else {
+        const password = String(fd.get('password') || '');
+        const { error } = await sb.auth.updateUser({ password });
+        if (error) throw error;
+        form.reset();
+        closeReset();
+        await route();
+        toast('密码已更新，下次用新密码登录');
+      }
+    } catch (err) {
+      const ex = explain(err);
+      errEl.textContent = ex.title + '：' + ex.detail;
+      errEl.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+    return;
+  }
+
   /* 提问 */
   if (form.id === 'ask-form') {
     e.preventDefault();
@@ -910,20 +1001,30 @@ window.addEventListener('hashchange', route);
 (async function boot() {
   if (configError) { renderFatal(configError); renderUserBox(); return; }
 
-  try {
-    const { data } = await sb.auth.getSession();
-    await applySession(data.session);
-  } catch (err) {
-    renderError(err);
-    return;
-  }
+  let knownUserId = null;
 
-  let knownUserId = me ? me.id : null;
+  // ⚠️ 必须在调用任何其它 auth 方法**之前**注册监听：
+  //    点了邮件里的重置链接进来时，SDK 会在初始化过程中就抛出 PASSWORD_RECOVERY，
+  //    注册晚了就漏掉了，用户会看到"链接点了却什么都没发生"。
   sb.auth.onAuthStateChange((event, session) => {
-    if (event === 'INITIAL_SESSION') return;
+    if (event === 'INITIAL_SESSION') return;   // 首次渲染走下面的 boot 流程
+
+    // 用户点了「重置密码」邮件里的链接
+    if (event === 'PASSWORD_RECOVERY') {
+      setTimeout(async () => {
+        await applySession(session);
+        renderUserBox();
+        closeAuth(); closeProfile();
+        await route();
+        openReset('set');
+      }, 0);
+      return;
+    }
+
     const nextId = session && session.user ? session.user.id : null;
     if (nextId === knownUserId) return;      // 令牌续期之类的，不用重新渲染
     knownUserId = nextId;
+
     // 放在下一个事件循环里再调用其它接口：在回调里直接 await 会和 SDK 抢锁
     setTimeout(async () => {
       await applySession(session);
@@ -931,6 +1032,15 @@ window.addEventListener('hashchange', route);
       await route();
     }, 0);
   });
+
+  try {
+    const { data } = await sb.auth.getSession();
+    knownUserId = data.session && data.session.user ? data.session.user.id : null;
+    await applySession(data.session);
+  } catch (err) {
+    renderError(err);
+    return;
+  }
 
   await route();
 })();

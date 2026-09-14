@@ -62,6 +62,10 @@
 
       <p class="form-error hidden" id="auth-error"></p>
 
+      <p class="auth-help login-only">
+        <button type="button" class="linkbtn" data-action="forgot">忘记密码？</button>
+      </p>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
         <button type="submit" class="btn btn-primary" id="auth-submit">登录</button>
@@ -81,9 +85,38 @@
         <input name="display_name" maxlength="16" required placeholder="例如：小明">
       </label>
       <p class="form-error hidden" id="profile-error"></p>
-      <div class="modal-actions">
-        <button type="button" class="btn btn-ghost" data-action="logout">退出登录</button>
+      <div class="modal-actions modal-actions-split">
+        <div>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="logout">退出登录</button>
+        </div>
         <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 找回密码 / 设置新密码（两种模式共用一个弹窗） -->
+<div class="modal-mask hidden" id="reset-mask">
+  <div class="modal">
+    <h2 class="modal-title" id="reset-title">找回密码</h2>
+    <p class="modal-sub" id="reset-sub">填注册时用的邮箱，我们会发一封带重置链接的邮件给你。</p>
+    <form id="reset-form">
+      <label class="field" id="reset-email-field">
+        <span class="field-label">邮箱</span>
+        <input name="email" type="email" required autocomplete="email" placeholder="you@example.com">
+      </label>
+      <label class="field hidden" id="reset-pass-field">
+        <span class="field-label">新密码</span>
+        <input name="password" type="password" minlength="6" required autocomplete="new-password" placeholder="至少 6 位">
+      </label>
+
+      <p class="form-error hidden" id="reset-error"></p>
+      <p class="form-ok hidden" id="reset-ok"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
+        <button type="submit" class="btn btn-primary" id="reset-submit">发送重置邮件</button>
       </div>
     </form>
   </div>
