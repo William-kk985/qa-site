@@ -89,6 +89,11 @@ create table if not exists public.questions (
   accepted_answer_id uuid            -- 外键在 answers 表建好之后再补，见第 4 节
 );
 
+-- ⚠️ 这几列必须在**建视图之前**就存在（第 7 / 13.5 节的视图会引用它们），
+--    所以要加在表刚建好的地方，不能挪到后面的"新功能"小节里。
+--    （同类的还有 profiles.role、questions.status、notifications.note）
+alter table public.questions add column if not exists edited_at timestamptz;
+
 create index if not exists questions_created_at_idx on public.questions (created_at desc);
 create index if not exists questions_author_idx     on public.questions (author_id);
 create index if not exists questions_tags_idx       on public.questions using gin (tags);
@@ -130,6 +135,9 @@ create table if not exists public.answers (
   body        text not null check (char_length(body) between 1 and 20000),
   created_at  timestamptz not null default now()
 );
+
+-- 同上：视图会引用，必须在这里加
+alter table public.answers add column if not exists edited_at timestamptz;
 
 create index if not exists answers_question_idx on public.answers (question_id, created_at);
 create index if not exists answers_author_idx   on public.answers (author_id);
@@ -776,10 +784,11 @@ select
   q.views,
   q.accepted_answer_id,
   jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
-  (select count(*) from public.answers a        where a.question_id = q.id)::int as answer_count,
+      (select count(*) from public.answers a        where a.question_id = q.id)::int as answer_count,
   (select count(*) from public.question_votes v where v.question_id = q.id)::int as votes,
   q.status,
-  q.author_id
+  q.author_id,
+  q.edited_at
 from public.questions q
 join public.profiles p on p.id = q.author_id;
 
@@ -796,7 +805,8 @@ select
   jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
   (select count(*) from public.answer_votes v where v.answer_id = a.id)::int as votes,
   (select q.title from public.questions q where q.id = a.question_id) as question_title,
-  a.author_id
+  a.author_id,
+  a.edited_at
 from public.answers a
 join public.profiles p on p.id = a.author_id;
 
@@ -1284,3 +1294,91 @@ end;
 $$;
 
 grant execute on function public.admin_delete_answer(uuid, text) to authenticated;
+
+
+-- ============================================================================
+-- 17. 用户编辑自己的内容（提问的标题+正文、回答的正文）
+--
+--     规则：**只有作者本人能改**。
+--
+--     为什么不给管理者开这个口子：管理者能改的只有**标签**（分类信息），
+--     正文是作者的原话，代改等于篡改他人言论。管理者想处理不合适的正文，
+--     该用的是「删除（附理由）」——见第 16.1 节的权限总表。
+--
+--     改过之后 questions.edited_at / answers.edited_at 会记下时间，
+--     界面上显示「已编辑」。
+--
+--     ⚠️ edited_at 列是在第 2、3 节（表刚建好的地方）加的，不是这里 ——
+--        因为第 7 / 13.5 节的视图要引用它，视图必须在列存在之后才能建。
+-- ============================================================================
+
+-- 17.1 改自己的提问（标题 + 正文）
+create or replace function public.update_question(p_question_id uuid, p_title text, p_body text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_title text := trim(coalesce(p_title, ''));
+  v_body  text := trim(coalesce(p_body, ''));
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+
+  if not exists (
+    select 1 from public.questions
+     where id = p_question_id and author_id = auth.uid()
+  ) then
+    raise exception '只能修改自己提的问题';
+  end if;
+
+  if char_length(v_title) < 4 or char_length(v_title) > 120 then
+    raise exception '标题要 4～120 个字';
+  end if;
+  if v_body = '' then
+    raise exception '正文不能为空';
+  end if;
+  if char_length(v_body) > 20000 then
+    raise exception '正文太长了';
+  end if;
+
+  update public.questions
+     set title = v_title, body = v_body, edited_at = now()
+   where id = p_question_id;
+end;
+$$;
+
+-- 17.2 改自己的回答（正文）
+create or replace function public.update_answer(p_answer_id uuid, p_body text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_body text := trim(coalesce(p_body, ''));
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+
+  if not exists (
+    select 1 from public.answers
+     where id = p_answer_id and author_id = auth.uid()
+  ) then
+    raise exception '只能修改自己的回答';
+  end if;
+
+  if v_body = '' then
+    raise exception '回答不能为空';
+  end if;
+  if char_length(v_body) > 20000 then
+    raise exception '回答太长了';
+  end if;
+
+  update public.answers
+     set body = v_body, edited_at = now()
+   where id = p_answer_id;
+end;
+$$;
+
+grant execute on function public.update_question(uuid, text, text) to authenticated;
+grant execute on function public.update_answer(uuid, text)          to authenticated;

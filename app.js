@@ -117,8 +117,14 @@ function explain(e) {
     return { title: '没有权限做这件事', detail: '可能是登录状态过期了，退出后重新登录一次。' };
   if (m.includes('failed to fetch') || m.includes('networkerror') || m.includes('load failed'))
     return { title: '连不上服务器', detail: '检查一下网络；如果开着代理或 VPN，试着关掉再看。' };
+  // 数据库函数里自己抛的中文提示（"只能修改自己提的问题"这类），直接显示
+  if (/[\u4e00-\u9fa5]/.test(raw)) return { title: raw, detail: '' };
+
   return { title: '出错了', detail: raw };
 }
+
+/* 拼错误提示：没有 detail 时不要留个多余的冒号 */
+const errMsg = ex => (ex.detail ? ex.title + '：' + ex.detail : ex.title);
 
 /* ------------------------------ 连接后端 ------------------------------ */
 const CFG = window.QA_CONFIG || {};
@@ -143,6 +149,7 @@ let identities = [];        // 当前账号绑定了哪些登录方式
 let myAnswers = [];         // 我回答过的（「我的」页面）
 let myViews = [];           // 最近 30 天的浏览记录
 let members = [];           // 成员列表（大管理者面板）
+let currentQuestion = null; // 当前正在看的问题（编辑时要从这里取原文）
 const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all' };
 let lastViewedId = null;
 let authMode = 'login';
@@ -177,6 +184,7 @@ const mapQuestion = r => ({
   acceptedAnswerId: r.accepted_answer_id,
   status: r.status || 'open',
   authorId: r.author_id,
+  editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
   author: r.author || { id: null, name: '匿名用户', role: 'user' },
 });
 
@@ -186,6 +194,7 @@ const mapAnswer = r => ({
   questionTitle: r.question_title || '',
   body: r.body,
   createdAt: Date.parse(r.created_at),
+  editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
   votes: r.votes || 0,
   authorId: r.author_id,
   author: r.author || { id: null, name: '匿名用户', role: 'user' },
@@ -314,6 +323,19 @@ const api = {
       { p_question_id: questionId, p_tags: tags });
     if (error) throw error;
     return data;
+  },
+
+  /* 编辑自己的内容（只有作者本人能调，数据库函数里再查一遍） */
+  async updateQuestion(questionId, title, body) {
+    const { error } = await sb.rpc('update_question',
+      { p_question_id: questionId, p_title: title, p_body: body });
+    if (error) throw error;
+  },
+
+  async updateAnswer(answerId, body) {
+    const { error } = await sb.rpc('update_answer',
+      { p_answer_id: answerId, p_body: body });
+    if (error) throw error;
   },
 
   async sendReminder(userId, text) {
@@ -557,7 +579,7 @@ async function startGithubLogin(btn) {
     if (error) throw error;
   } catch (err) {
     const ex = explain(err);
-    const msg = ex.title + '：' + ex.detail;
+    const msg = errMsg(ex);
     if (!$('#modal-mask').classList.contains('hidden')) showAuthError(msg);
     else toast(msg);
     if (btn) btn.disabled = false;
@@ -760,6 +782,29 @@ async function openMembers() {
 }
 
 function closeMembers() { $('#members-mask').classList.add('hidden'); }
+
+/* ------------------------------ 编辑自己的提问 / 回答 ------------------------------ */
+let editTarget = null;   // { kind: 'question' | 'answer', id }
+
+function openEdit(kind, id, data) {
+  editTarget = { kind, id };
+  const isQ = kind === 'question';
+
+  $('#edit-modal-title').textContent = isQ ? '编辑提问' : '编辑回答';
+  $('#edit-title-field').classList.toggle('hidden', !isQ);
+  $('#edit-body-label').textContent = isQ ? '详细描述' : '回答内容';
+  $('#edit-form [name=title]').value = isQ ? (data.title || '') : '';
+  $('#edit-form [name=body]').value = data.body || '';
+  $('#edit-error').classList.add('hidden');
+  $('#edit-mask').classList.remove('hidden');
+
+  setTimeout(() => $('#edit-form [name=' + (isQ ? 'title' : 'body') + ']').focus(), 30);
+}
+
+function closeEdit() {
+  $('#edit-mask').classList.add('hidden');
+  editTarget = null;
+}
 
 function renderMembers() {
   const canEditRoles = myLevel() === 3;
@@ -1033,6 +1078,8 @@ function renderDetail(q) {
     return;
   }
 
+  currentQuestion = q;
+
   const answers = q.answers.slice().sort((a, b) => {
     if (a.id === q.acceptedAnswerId) return -1;
     if (b.id === q.acceptedAnswerId) return 1;
@@ -1047,13 +1094,16 @@ function renderDetail(q) {
         <div class="who">
           ${userChip(a.author, a.createdAt, 'lg')}
           ${accepted ? '<span class="pill pill-green">最佳答案</span>' : ''}
+          ${a.editedAt ? '<span class="faint" style="font-size:12px">已编辑</span>' : ''}
         </div>
         <div class="answer-actions">
           <button class="vote-btn ${hasVoted('a', a.id) ? 'is-on' : ''}"
                   data-action="vote-a" data-q="${q.id}" data-a="${a.id}">▲ 有用 ${a.votes}</button>
           ${isMine(q.author) ? `<button class="btn btn-ghost btn-sm" data-action="accept"
                   data-q="${q.id}" data-a="${a.id}">${accepted ? '取消最佳' : '设为最佳'}</button>` : ''}
-          ${isMine(a.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-a"
+          ${isMine(a.author) ? `<button class="btn btn-soft btn-sm" data-action="edit-a"
+                  data-q="${q.id}" data-a="${a.id}">编辑</button>
+            <button class="btn btn-ghost btn-sm" data-action="del-a"
                   data-q="${q.id}" data-a="${a.id}">删除</button>` : ''}
           ${canManage(a.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-a-admin"
                   data-q="${q.id}" data-a="${a.id}" data-name="${esc(a.author.name)}">删除（管理）</button>` : ''}
@@ -1103,13 +1153,15 @@ function renderDetail(q) {
 
       <div class="q-foot">
         <div>${userChip(q.author, q.createdAt)} <span class="dot">·</span>
-          <span class="faint">${q.views} 次浏览</span></div>
+          <span class="faint">${q.views} 次浏览</span>
+          ${q.editedAt ? '<span class="dot">·</span><span class="faint">已编辑</span>' : ''}</div>
         <div class="q-actions">
           <button class="vote-btn ${hasVoted('q', q.id) ? 'is-on' : ''}"
                   data-action="vote-q" data-q="${q.id}">▲ 有用 ${q.votes}</button>
           ${bookmarkBtn(q.id)}
 
           ${isMine(q.author) ? `
+            <button class="btn btn-soft btn-sm" data-action="edit-q" data-q="${q.id}">编辑</button>
             <button class="btn btn-soft btn-sm" data-action="edit-tags" data-q="${q.id}"
                     data-tags="${esc(q.tags.join(','))}">改标签</button>
             <button class="btn btn-soft btn-sm" data-action="toggle-status" data-q="${q.id}"
@@ -1271,7 +1323,7 @@ document.addEventListener('click', async e => {
         break;
 
       case 'close-modal':
-        closeAuth(); closeProfile(); closeReset(); closeNotices(); closeMembers();
+        closeAuth(); closeProfile(); closeReset(); closeNotices(); closeMembers(); closeEdit();
         break;
 
       case 'me':
@@ -1290,6 +1342,16 @@ document.addEventListener('click', async e => {
         await route();
         toast(el.dataset.status === 'solved' ? '已标记为已解决' : '已改回待回答');
         break;
+
+      case 'edit-q':
+        if (currentQuestion) openEdit('question', currentQuestion.id, currentQuestion);
+        break;
+
+      case 'edit-a': {
+        const ans = currentQuestion && currentQuestion.answers.find(x => x.id === el.dataset.a);
+        if (ans) openEdit('answer', ans.id, ans);
+        break;
+      }
 
       case 'edit-tags': {
         const input = prompt('标签（用逗号分隔，最多 5 个，留空就是清掉）：', el.dataset.tags || '');
@@ -1458,7 +1520,7 @@ document.addEventListener('click', async e => {
         } catch (err) {
           const ex = explain(err);
           const hint = $('#identity-hint');
-          hint.textContent = ex.title + '：' + ex.detail;
+          hint.textContent = errMsg(ex);
           hint.classList.add('is-error');
           el.disabled = false;
         }
@@ -1503,7 +1565,7 @@ document.addEventListener('click', async e => {
     }
   } catch (err) {
     const ex = explain(err);
-    toast(ex.title + '：' + ex.detail);
+    toast(errMsg(ex));
   }
 });
 
@@ -1525,6 +1587,10 @@ $('#notice-mask').addEventListener('click', e => {
 
 $('#members-mask').addEventListener('click', e => {
   if (e.target.id === 'members-mask') closeMembers();
+});
+
+$('#edit-mask').addEventListener('click', e => {
+  if (e.target.id === 'edit-mask') closeEdit();
 });
 
 /* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */
@@ -1587,7 +1653,42 @@ document.addEventListener('submit', async e => {
       }
     } catch (err) {
       const ex = explain(err);
-      showAuthError(ex.title + '：' + ex.detail);
+      showAuthError(errMsg(ex));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+    return;
+  }
+
+  /* 保存编辑（提问的标题+正文 / 回答的正文） */
+  if (form.id === 'edit-form') {
+    e.preventDefault();
+    if (!editTarget) return;
+
+    const fd = new FormData(form);
+    const errEl = $('#edit-error');
+    const btn = form.querySelector('button[type=submit]');
+    const original = btn.textContent;
+    errEl.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+
+    try {
+      if (editTarget.kind === 'question') {
+        await api.updateQuestion(editTarget.id,
+          String(fd.get('title') || ''), String(fd.get('body') || ''));
+      } else {
+        await api.updateAnswer(editTarget.id, String(fd.get('body') || ''));
+      }
+      closeEdit();
+      await api.list();
+      await route();
+      toast('已保存修改');
+    } catch (err) {
+      const ex = explain(err);
+      errEl.textContent = errMsg(ex);
+      errEl.classList.remove('hidden');
     } finally {
       btn.disabled = false;
       btn.textContent = original;
@@ -1636,7 +1737,7 @@ document.addEventListener('submit', async e => {
       toast('资料已保存');
     } catch (err) {
       const ex = explain(err);
-      errEl.textContent = ex.title + '：' + ex.detail;
+      errEl.textContent = errMsg(ex);
       errEl.classList.remove('hidden');
     } finally {
       btn.disabled = false;
@@ -1680,7 +1781,7 @@ document.addEventListener('submit', async e => {
       }
     } catch (err) {
       const ex = explain(err);
-      errEl.textContent = ex.title + '：' + ex.detail;
+      errEl.textContent = errMsg(ex);
       errEl.classList.remove('hidden');
     } finally {
       btn.disabled = false;
@@ -1709,7 +1810,7 @@ document.addEventListener('submit', async e => {
       toast('问题已发布');
     } catch (err) {
       const ex = explain(err);
-      toast(ex.title + '：' + ex.detail);
+      toast(errMsg(ex));
       btn.disabled = false; btn.textContent = '发布问题';
     }
     return;
@@ -1730,7 +1831,7 @@ document.addEventListener('submit', async e => {
       toast('回答已发布');
     } catch (err) {
       const ex = explain(err);
-      toast(ex.title + '：' + ex.detail);
+      toast(errMsg(ex));
       btn.disabled = false; btn.textContent = '发布回答';
     }
     return;

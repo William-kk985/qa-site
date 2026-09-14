@@ -231,6 +231,28 @@
   </div>
 </div>
 
+<!-- 编辑自己的提问 / 回答 -->
+<div class="modal-mask hidden" id="edit-mask">
+  <div class="modal modal-wide">
+    <h2 class="modal-title" id="edit-modal-title">编辑</h2>
+    <form id="edit-form">
+      <label class="field hidden" id="edit-title-field">
+        <span class="field-label">标题</span>
+        <input name="title" maxlength="120" placeholder="一句话说清你的问题">
+      </label>
+      <label class="field">
+        <span class="field-label" id="edit-body-label">正文</span>
+        <textarea name="body"></textarea>
+      </label>
+      <p class="form-error hidden" id="edit-error"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary">保存修改</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="config.js"></script>
