@@ -313,23 +313,34 @@ const api = {
   },
 
   async listMembers() {
-    const { data, error } = await sb.from('profiles')
-      .select('id, display_name, role, created_at')
-      .order('created_at', { ascending: true });
+    // 用 weekly_stats 函数拿：它带真名、参赛年数、本周提问/回答数
+    // （真名没有开放列级查询权限，只有管理者能通过这个函数看到）
+    const { data, error } = await sb.rpc('weekly_stats');
     if (error) throw error;
-    members = data;
+    members = data || [];
+  },
+
+  async updateProfile(fields) {
+    const { error } = await sb.from('profiles').update(fields).eq('id', me.id);
+    if (error) throw error;
+  },
+
+  async remindIncomplete(text) {
+    const { data, error } = await sb.rpc('remind_incomplete', { p_text: text });
+    if (error) throw error;
+    return data;
   },
 
   /* 角色可能被大管理者改掉，登录状态下定期刷一下 */
   async refreshMe() {
     if (!me) return;
     try {
-      const { data } = await sb.from('profiles')
-        .select('display_name, role').eq('id', me.id).maybeSingle();
-      if (!data) return;
+      const { data } = await sb.rpc('my_profile');
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) return;
       let changed = false;
-      if (data.role && data.role !== me.role) { me.role = data.role; changed = true; }
-      if (data.display_name && data.display_name !== me.name) { me.name = data.display_name; changed = true; }
+      if (row.role && row.role !== me.role) { me.role = row.role; changed = true; }
+      if (row.display_name && row.display_name !== me.name) { me.name = row.display_name; changed = true; }
       if (changed) renderUserBox();
     } catch (_) { /* 忽略 */ }
   },
@@ -440,16 +451,22 @@ async function applySession(session) {
   const md = u.user_metadata || {};
   let name = md.display_name || md.user_name || md.preferred_username || md.full_name || md.name
     || (u.email || '').split('@')[0] || '匿名用户';
-  let role = 'user';
+  let role = 'user', realName = '', compYears = null;
 
+  // 用函数读自己的资料：真名和参赛年数没有开放列级查询权限，只能走这个函数
   try {
-    const { data } = await sb.from('profiles')
-      .select('display_name, role').eq('id', u.id).maybeSingle();
-    if (data && data.display_name) name = data.display_name;
-    if (data && data.role) role = data.role;
-  } catch (_) { /* profiles 还没建好时用兜底昵称 */ }
+    const { data } = await sb.rpc('my_profile');
+    const row = Array.isArray(data) ? data[0] : data;
+    if (row) {
+      if (row.display_name) name = row.display_name;
+      if (row.role) role = row.role;
+      realName = row.real_name || '';
+      compYears = (row.comp_years === null || row.comp_years === undefined)
+        ? null : Number(row.comp_years);
+    }
+  } catch (_) { /* profiles 还没升级时用兜底值 */ }
 
-  me = { id: u.id, name, email: u.email || '', role };
+  me = { id: u.id, name, email: u.email || '', role, realName, compYears };
   await Promise.all([api.loadMyVotes(), api.loadMyBookmarks(), api.loadNotices()]);
 }
 
@@ -594,9 +611,13 @@ async function openProfile() {
   $('#identity-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#profile-mask').classList.remove('hidden');
 
-  // 「成员管理」只有大管理者看得到
+  // 「成员」只有管理者以上看得到
   const mb = $('#members-btn');
-  if (mb) mb.classList.toggle('hidden', myLevel() !== 3);
+  if (mb) mb.classList.toggle('hidden', myLevel() < 2);
+
+  $('#profile-form [name=real_name]').value = me.realName || '';
+  $('#profile-form [name=comp_years]').value =
+    (me.compYears === null || me.compYears === undefined) ? '' : me.compYears;
   setTimeout(() => $('#profile-form [name=display_name]').focus(), 30);
 
   await api.loadIdentities();
@@ -699,9 +720,9 @@ async function openNotices() {
 
 function closeNotices() { $('#notice-mask').classList.add('hidden'); }
 
-/* ------------------------------ 成员管理（只有大管理者） ------------------------------ */
+/* ------------------------------ 成员列表（管理者以上） ------------------------------ */
 async function openMembers() {
-  if (myLevel() !== 3) { toast('只有大管理者能打开成员管理'); return; }
+  if (myLevel() < 2) { toast('只有管理者能看成员列表'); return; }
 
   closeProfile();
   $('#members-count').textContent = '';
@@ -720,20 +741,43 @@ async function openMembers() {
 function closeMembers() { $('#members-mask').classList.add('hidden'); }
 
 function renderMembers() {
+  const canEditRoles = myLevel() === 3;
   $('#members-count').textContent = members.length + ' 人';
 
-  $('#member-list').innerHTML = members.map(m => {
-    const isSelf = me && m.id === me.id;
-    const btns = ['user', 'admin', 'super_admin'].map(r => `
-      <button class="btn btn-ghost btn-sm ${m.role === r ? 'is-current' : ''}"
-              data-action="set-role" data-u="${m.id}" data-role="${r}"
-              data-name="${esc(m.display_name)}" ${isSelf ? 'disabled' : ''}>
-        ${ROLE_LABEL[r]}
-      </button>`).join('');
+  const rb = $('#remind-incomplete');
+  if (rb) rb.classList.toggle('hidden', !canEditRoles);
+
+  // 本周最活跃的排前面
+  const sorted = members.slice().sort((a, b) =>
+    (b.questions_this_week + b.answers_this_week) - (a.questions_this_week + a.answers_this_week)
+    || String(a.real_name || a.display_name || '').localeCompare(String(b.real_name || b.display_name || '')));
+
+  $('#member-list').innerHTML = sorted.map(m => {
+    const isSelf = me && m.user_id === me.id;
+
+    const who = m.real_name
+      ? `${esc(m.real_name)} <span class="faint">（${esc(m.display_name)}）</span>`
+      : `${esc(m.display_name)} <span class="faint">（真名未填）</span>`;
+
+    const btns = canEditRoles
+      ? ['user', 'admin', 'super_admin'].map(r => `
+          <button class="btn btn-ghost btn-sm ${m.role === r ? 'is-current' : ''}"
+                  data-action="set-role" data-u="${m.user_id}" data-role="${r}"
+                  data-name="${esc(m.display_name)}" ${isSelf ? 'disabled' : ''}>
+            ${ROLE_LABEL[r]}
+          </button>`).join('')
+      : '';
 
     return `<div class="member-row">
-      <span class="member-name">${esc(m.display_name)}${isSelf ? ' <span class="faint">（我）</span>' : ''}</span>
-      <span class="member-actions">${btns}</span>
+      <div class="member-info">
+        <div class="member-name">${who}${roleBadge(m)}${isSelf ? '<span class="faint">（我）</span>' : ''}</div>
+        <div class="member-meta">
+          <span>参赛 ${m.comp_years === null || m.comp_years === undefined ? '未填' : m.comp_years + ' 年'}</span>
+          <span>·</span><span>本周提问 <b>${m.questions_this_week}</b></span>
+          <span>·</span><span>本周回答 <b>${m.answers_this_week}</b></span>
+        </div>
+      </div>
+      ${btns ? `<div class="member-actions">${btns}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -787,6 +831,9 @@ function renderList() {
       ? ['没有匹配的问题。', '换个筛选条件试试。']
       : ['还没有人提问。', '点右上角「提问题」，发第一个。'];
 
+  // 资料没填全就顶个提示条（用 GitHub 登录的人一开始都是空的）
+  const needProfile = me && (!me.realName || me.compYears === null || me.compYears === undefined);
+
   const cards = list.length ? list.map(q => `
     <article class="qcard">
       <div class="qcard-side">
@@ -816,6 +863,12 @@ function renderList() {
     </div>`;
 
   $('#app').innerHTML = `
+    ${needProfile ? `
+    <div class="noticebar">
+      <span class="grow">📝 你的资料还没填完整，补上之后管理者才能统计到你的贡献。</span>
+      <button class="btn btn-soft btn-sm" data-action="profile">去补充</button>
+    </div>` : ''}
+
     <section class="stats">
       <div><div class="num">${questions.length}</div><div class="lbl">问题</div></div>
       <div><div class="num">${answers}</div><div class="lbl">回答</div></div>
@@ -1215,6 +1268,13 @@ document.addEventListener('click', async e => {
         await openMembers();
         break;
 
+      case 'remind-incomplete': {
+        if (!confirm('给所有「真实姓名或参赛年数没填」的成员各发一条提醒通知？')) return;
+        const n = await api.remindIncomplete(null);
+        toast('已提醒 ' + n + ' 人');
+        break;
+      }
+
       case 'set-role': {
         const role = el.dataset.role;
         if (!confirm(`把「${el.dataset.name}」设为「${ROLE_LABEL[role]}」？`)) return;
@@ -1406,6 +1466,7 @@ document.addEventListener('submit', async e => {
     const email = String(fd.get('email') || '').trim();
     const password = String(fd.get('password') || '');
     const displayName = String(fd.get('display_name') || '').trim();
+    const realName = String(fd.get('real_name') || '').trim();
     const btn = $('#auth-submit');
     const original = btn.textContent;
 
@@ -1426,7 +1487,12 @@ document.addEventListener('submit', async e => {
         const { data, error } = await sb.auth.signUp({
           email,
           password,
-          options: { data: { display_name: displayName || email.split('@')[0] } },
+          options: {
+            data: {
+              display_name: displayName || email.split('@')[0],
+              real_name: realName,
+            },
+          },
         });
         if (error) throw error;
 
@@ -1451,29 +1517,45 @@ document.addEventListener('submit', async e => {
     return;
   }
 
-  /* 改昵称 */
+  /* 改资料（昵称 / 真名 / 参赛年数） */
   if (form.id === 'profile-form') {
     e.preventDefault();
     if (!me) return;
-    const name = String(new FormData(form).get('display_name') || '').trim();
-    if (!name) return;
+
+    const fd = new FormData(form);
+    const name = String(fd.get('display_name') || '').trim();
+    const realName = String(fd.get('real_name') || '').trim();
+    const yearsRaw = String(fd.get('comp_years') || '').trim();
+    const compYears = yearsRaw === '' ? null : Number(yearsRaw);
 
     const errEl = $('#profile-error');
     const btn = form.querySelector('button[type=submit]');
     const original = btn.textContent;
     errEl.classList.add('hidden');
+
+    if (!name) { errEl.textContent = '昵称不能为空'; errEl.classList.remove('hidden'); return; }
+    if (compYears !== null && (!Number.isInteger(compYears) || compYears < 0 || compYears > 30)) {
+      errEl.textContent = '参赛年数请填 0～30 的整数';
+      errEl.classList.remove('hidden');
+      return;
+    }
+
     btn.disabled = true;
     btn.textContent = '保存中…';
 
     try {
-      const { error } = await sb.from('profiles')
-        .update({ display_name: name }).eq('id', me.id);
-      if (error) throw error;
+      await api.updateProfile({
+        display_name: name,
+        real_name: realName || null,
+        comp_years: compYears,
+      });
       me.name = name;
+      me.realName = realName;
+      me.compYears = compYears;
       closeProfile();
       renderUserBox();
       await route();
-      toast('昵称已改为「' + name + '」');
+      toast('资料已保存');
     } catch (err) {
       const ex = explain(err);
       errEl.textContent = ex.title + '：' + ex.detail;

@@ -70,6 +70,10 @@
         <span class="field-label">昵称（别人看到的名字）</span>
         <input name="display_name" maxlength="16" placeholder="例如：小明" autocomplete="nickname">
       </label>
+      <label class="field signup-only">
+        <span class="field-label">真实姓名（只有管理者看得到）</span>
+        <input name="real_name" maxlength="20" placeholder="例如：张三" autocomplete="name">
+      </label>
       <label class="field">
         <span class="field-label">邮箱</span>
         <input name="email" type="email" required autocomplete="email" placeholder="you@example.com">
@@ -102,6 +106,14 @@
       <label class="field">
         <span class="field-label">昵称（别人看到的名字）</span>
         <input name="display_name" maxlength="16" required placeholder="例如：小明">
+      </label>
+      <label class="field">
+        <span class="field-label">真实姓名（只有管理者看得到）</span>
+        <input name="real_name" maxlength="20" placeholder="例如：张三" autocomplete="name">
+      </label>
+      <label class="field">
+        <span class="field-label">参赛年数</span>
+        <input name="comp_years" type="number" min="0" max="30" placeholder="例如：3">
       </label>
       <p class="form-error hidden" id="profile-error"></p>
       <div class="modal-actions modal-actions-split">
@@ -178,10 +190,16 @@
 <div class="modal-mask hidden" id="members-mask">
   <div class="modal modal-wide">
     <div class="modal-head">
-      <h2 class="modal-title">成员管理</h2>
-      <span class="faint" id="members-count"></span>
+      <h2 class="modal-title">成员</h2>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="faint" id="members-count"></span>
+        <button type="button" class="btn btn-soft btn-sm hidden" id="remind-incomplete"
+                data-action="remind-incomplete">提醒未补全资料的人</button>
+      </div>
     </div>
-    <p class="modal-sub">大管理者可以任命或撤销角色。管理者之间互不管理，也不能管大管理者。</p>
+    <p class="modal-sub">
+      本周 = 从周一算起。真实姓名只有管理者看得到；「普通用户 / 管理者 / 大管理者」三个按钮只有大管理者能点。
+    </p>
     <div class="member-list" id="member-list"></div>
     <div class="modal-actions">
       <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>

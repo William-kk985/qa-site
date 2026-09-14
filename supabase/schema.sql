@@ -935,3 +935,189 @@ update public.profiles
 select display_name as 昵称, role as 角色
   from public.profiles
  order by public.role_level(role) desc, created_at;
+
+
+-- ============================================================================
+-- 14. 真实姓名 / 参赛年数 / 每周统计 / 资料补全提醒
+--
+--     ⚠️ 隐私设计（重要）：
+--     real_name 和 comp_years 是**真名类信息**，不能让随便谁都能查。
+--     所以这一节把 profiles 的 SELECT 权限**收窄到了具体几列**，
+--     真名和参赛年数只能通过下面两个 security definer 函数拿到：
+--       · my_profile()     —— 只能看自己那一行
+--       · weekly_stats()   —— 只有管理者能看（含全员的真名 / 年数 / 本周数据）
+--
+--     ⚠️ 副作用：从此 `select *` 查 profiles 会报权限错误，必须写明列名。
+--        这是故意的，不是 bug。要撤销这个限制就把 14.2 节注释掉。
+-- ============================================================================
+
+
+-- ---------------------------------------------------------------------------
+-- 14.1 新字段
+-- ---------------------------------------------------------------------------
+alter table public.profiles add column if not exists real_name  text;
+alter table public.profiles add column if not exists comp_years int;
+
+alter table public.profiles drop constraint if exists profiles_comp_years_check;
+alter table public.profiles add constraint profiles_comp_years_check
+  check (comp_years is null or (comp_years >= 0 and comp_years <= 30));
+
+
+-- ---------------------------------------------------------------------------
+-- 14.2 权限收窄：只公开这几列，真名相关的不给
+--      （角色 role 仍然只读，改角色只能走 set_user_role 函数）
+-- ---------------------------------------------------------------------------
+revoke select on public.profiles from anon, authenticated;
+grant select (id, display_name, role, created_at) on public.profiles to anon, authenticated;
+
+-- 自己能改的列：昵称、真名、参赛年数。**注意这里没有 role**，所以提不了权
+grant update (display_name, real_name, comp_years) on public.profiles to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.3 注册时把真名一起存下来
+--      （邮箱注册的表单里会填；用 GitHub 登录的人这里没有，后面会提醒他补）
+-- ---------------------------------------------------------------------------
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, display_name, real_name)
+  values (
+    new.id,
+    coalesce(
+      nullif(trim(new.raw_user_meta_data ->> 'display_name'), ''),        -- 邮箱注册时自己填的
+      nullif(trim(new.raw_user_meta_data ->> 'user_name'), ''),           -- GitHub 用户名
+      nullif(trim(new.raw_user_meta_data ->> 'preferred_username'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
+      split_part(coalesce(new.email, 'user'), '@', 1)
+    ),
+    nullif(trim(new.raw_user_meta_data ->> 'real_name'), '')
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.4 看自己的资料（含真名 / 参赛年数）
+-- ---------------------------------------------------------------------------
+create or replace function public.my_profile()
+returns table (
+  id uuid, display_name text, real_name text, comp_years int, role text
+)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select p.id, p.display_name, p.real_name, p.comp_years, p.role
+    from public.profiles p
+   where p.id = auth.uid();
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.5 每周统计：每个人**本周**（周一起算）提问数 / 回答数
+--      只有管理者（admin / super_admin）能调用
+-- ---------------------------------------------------------------------------
+create or replace function public.weekly_stats()
+returns table (
+  user_id             uuid,
+  display_name        text,
+  real_name           text,
+  role                text,
+  comp_years          int,
+  questions_this_week int,
+  answers_this_week   int
+)
+language plpgsql
+security definer
+set search_path = public
+stable
+as $$
+begin
+  if public.role_level(public.my_role()) < 2 then
+    raise exception '只有管理者能看统计';
+  end if;
+
+  return query
+    select
+      p.id,
+      p.display_name,
+      p.real_name,
+      p.role,
+      p.comp_years,
+      (select count(*) from public.questions q
+        where q.author_id = p.id
+          and q.created_at >= date_trunc('week', now()))::int,
+      (select count(*) from public.answers a
+        where a.author_id = p.id
+          and a.created_at >= date_trunc('week', now()))::int
+    from public.profiles p
+   order by p.created_at;
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.6 大管理者一键提醒"资料没补全"的人（真名 / 参赛年数为空）
+--      返回通知了多少人
+-- ---------------------------------------------------------------------------
+create or replace function public.remind_incomplete(p_text text default null)
+returns int
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  n int;
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+  if public.my_role() <> 'super_admin' then raise exception '只有大管理者能群发提醒'; end if;
+
+  insert into public.notifications (user_id, actor_id, type, note)
+  select
+    p.id,
+    auth.uid(),
+    'remind',
+    coalesce(
+      nullif(trim(p_text), ''),
+      '请补全你的资料：' ||
+      case
+        when coalesce(trim(p.real_name), '') = '' and p.comp_years is null then '真实姓名、参赛年数'
+        when coalesce(trim(p.real_name), '') = '' then '真实姓名'
+        else '参赛年数'
+      end
+    )
+  from public.profiles p
+  where p.id <> auth.uid()
+    and (coalesce(trim(p.real_name), '') = '' or p.comp_years is null);
+
+  get diagnostics n = row_count;
+  return n;
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.7 授权
+-- ---------------------------------------------------------------------------
+grant execute on function public.my_profile()            to authenticated;
+grant execute on function public.weekly_stats()          to authenticated;
+grant execute on function public.remind_incomplete(text) to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.8 自检：还差多少人的资料没补全
+-- ---------------------------------------------------------------------------
+select
+  count(*)                                                   as 总人数,
+  count(*) filter (where coalesce(trim(real_name), '') = '') as 缺真名,
+  count(*) filter (where comp_years is null)                 as 缺参赛年数
+from public.profiles;
