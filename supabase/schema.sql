@@ -265,7 +265,9 @@ create policy "收藏：只能取消自己的" on public.bookmarks
 --    否则视图会以创建者（管理员）的身份读数据，绕过上面所有权限规则，
 --    等于把整张表公开给全世界。
 -- ============================================================================
-create or replace view public.questions_view
+-- ⚠️ 这里用 drop + create，不用 create or replace —— 见下面第 13.5 节的说明。
+drop view if exists public.questions_view;
+create view public.questions_view
 with (security_invoker = on) as
 select
   q.id,
@@ -281,7 +283,8 @@ select
 from public.questions q
 join public.profiles p on p.id = q.author_id;
 
-create or replace view public.answers_view
+drop view if exists public.answers_view;
+create view public.answers_view
 with (security_invoker = on) as
 select
   a.id,
@@ -349,6 +352,9 @@ end;
 $$;
 
 -- 8.2 浏览量 +1——未登录的访客也要能加，所以不能用普通 update 权限
+--     （第 13.7 节会把它换成 plpgsql 版本，顺便记浏览历史；
+--       这里先 drop 是为了重跑脚本时不留旧定义）
+drop function if exists public.increment_views(uuid);
 create or replace function public.increment_views(p_question_id uuid)
 returns void
 language sql
@@ -489,7 +495,9 @@ grant select, update, delete on public.notifications to authenticated;
 -- ↑ 故意没有 insert：通知只能由触发器写入
 
 -- 10.5 前端用的视图：把「谁」「哪个问题」一次查好
-create or replace view public.notifications_view
+-- ⚠️ 同样用 drop + create（第 13.4 节会给它加 note 列，重跑时不能靠 replace）
+drop view if exists public.notifications_view;
+create view public.notifications_view
 with (security_invoker = on) as
 select
   n.id,
@@ -1023,10 +1031,17 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
--- 14.5 每周统计：每个人**本周**（周一起算）提问数 / 回答数
+-- 14.5 成员统计：每个人**本周**（周一起算）和**累计**的提问数 / 回答数
 --      只有管理者（admin / super_admin）能调用
+--
+--      ⚠️ 这个函数**只在这里定义一次**。之前在第 15 节里又定义过一遍，
+--         重跑整个脚本时会因为"返回列不一致"报
+--         cannot change return type of existing function，所以合并到这里了。
+--         要加/改返回的列，就改这里，并且保持下面的 drop 语句。
 -- ---------------------------------------------------------------------------
-create or replace function public.weekly_stats()
+drop function if exists public.weekly_stats();
+
+create function public.weekly_stats()
 returns table (
   user_id             uuid,
   display_name        text,
@@ -1034,7 +1049,9 @@ returns table (
   role                text,
   comp_years          int,
   questions_this_week int,
-  answers_this_week   int
+  answers_this_week   int,
+  questions_total     int,
+  answers_total       int
 )
 language plpgsql
 security definer
@@ -1058,7 +1075,9 @@ begin
           and q.created_at >= date_trunc('week', now()))::int,
       (select count(*) from public.answers a
         where a.author_id = p.id
-          and a.created_at >= date_trunc('week', now()))::int
+          and a.created_at >= date_trunc('week', now()))::int,
+      (select count(*) from public.questions q where q.author_id = p.id)::int,
+      (select count(*) from public.answers   a where a.author_id = p.id)::int
     from public.profiles p
    order by p.created_at;
 end;
@@ -1124,60 +1143,23 @@ from public.profiles;
 
 
 -- ============================================================================
--- 15. 成员统计升级：加上**累计**提问 / 回答数
---     这样成员面板就能按「参赛年份 / 提问数 / 回答数」排序查看所有人。
+-- 15. 成员统计的排序维度（**说明，没有 SQL**）
 --
---     ⚠️ weekly_stats() 的输出列变了，必须**先 drop 再重建**：
---        create or replace function 不允许改返回的列。
---        重建之后要重新 grant（grant 会跟着 drop 一起没）。
+--     weekly_stats() 已经定义在第 14.5 节，它同时返回：
+--       · questions_this_week / answers_this_week  —— 本周（周一起算）
+--       · questions_total    / answers_total       —— 累计
+--     所以前端可以按「参赛年份 / 提问数 / 回答数 / 本周活跃」排序查看所有人。
+--
+--     ⚠️ 这里**故意不再重复定义** weekly_stats()：
+--        同一个函数在两处定义，重跑整个脚本时会因为返回列不一致而报
+--        cannot change return type of existing function。
+--        （同理，视图也不能在别处用 create or replace 定义成更少的列，
+--          否则报 42P16 cannot drop columns from view。）
 -- ============================================================================
-drop function if exists public.weekly_stats();
-
-create function public.weekly_stats()
-returns table (
-  user_id             uuid,
-  display_name        text,
-  real_name           text,
-  role                text,
-  comp_years          int,
-  questions_this_week int,
-  answers_this_week   int,
-  questions_total     int,
-  answers_total       int
-)
-language plpgsql
-security definer
-set search_path = public
-stable
-as $$
-begin
-  if public.role_level(public.my_role()) < 2 then
-    raise exception '只有管理者能看统计';
-  end if;
-
-  return query
-    select
-      p.id,
-      p.display_name,
-      p.real_name,
-      p.role,
-      p.comp_years,
-      (select count(*) from public.questions q
-        where q.author_id = p.id and q.created_at >= date_trunc('week', now()))::int,
-      (select count(*) from public.answers a
-        where a.author_id = p.id and a.created_at >= date_trunc('week', now()))::int,
-      (select count(*) from public.questions q where q.author_id = p.id)::int,
-      (select count(*) from public.answers   a where a.author_id = p.id)::int
-    from public.profiles p
-   order by p.created_at;
-end;
-$$;
-
-grant execute on function public.weekly_stats() to authenticated;
 
 
 -- ---------------------------------------------------------------------------
--- 15.1 权限回顾：谁能管谁（第 13.6 节的 can_manage 已经这么实现了，这里只是写清楚）
+-- 15.1 权限回顾：谁能管谁（第 13.6 节的 can_manage 就是这么实现的）
 --        普通用户 → 谁也管不了
 --        管理者   → **只能管普通用户**（管不了其他管理者，也管不了大管理者）
 --        大管理者 → 能管所有人（除了自己），包括管理者
