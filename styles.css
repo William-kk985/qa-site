@@ -813,6 +813,29 @@ h1, h2, h3, p { margin: 0; }
 }
 .noticebar .grow { flex: 1; min-width: 180px; }
 
+/* 成员面板顶部的排序 / 筛选 */
+.member-toolbar {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.member-toolbar label { display: flex; align-items: center; gap: 6px; }
+.member-toolbar select {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+.member-toolbar select:focus { border-color: var(--primary); }
+
 /* ====================== 小屏 ====================== */
 @media (max-width: 720px) {
   .topbar-inner { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }

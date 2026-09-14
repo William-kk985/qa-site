@@ -1121,3 +1121,64 @@ select
   count(*) filter (where coalesce(trim(real_name), '') = '') as 缺真名,
   count(*) filter (where comp_years is null)                 as 缺参赛年数
 from public.profiles;
+
+
+-- ============================================================================
+-- 15. 成员统计升级：加上**累计**提问 / 回答数
+--     这样成员面板就能按「参赛年份 / 提问数 / 回答数」排序查看所有人。
+--
+--     ⚠️ weekly_stats() 的输出列变了，必须**先 drop 再重建**：
+--        create or replace function 不允许改返回的列。
+--        重建之后要重新 grant（grant 会跟着 drop 一起没）。
+-- ============================================================================
+drop function if exists public.weekly_stats();
+
+create function public.weekly_stats()
+returns table (
+  user_id             uuid,
+  display_name        text,
+  real_name           text,
+  role                text,
+  comp_years          int,
+  questions_this_week int,
+  answers_this_week   int,
+  questions_total     int,
+  answers_total       int
+)
+language plpgsql
+security definer
+set search_path = public
+stable
+as $$
+begin
+  if public.role_level(public.my_role()) < 2 then
+    raise exception '只有管理者能看统计';
+  end if;
+
+  return query
+    select
+      p.id,
+      p.display_name,
+      p.real_name,
+      p.role,
+      p.comp_years,
+      (select count(*) from public.questions q
+        where q.author_id = p.id and q.created_at >= date_trunc('week', now()))::int,
+      (select count(*) from public.answers a
+        where a.author_id = p.id and a.created_at >= date_trunc('week', now()))::int,
+      (select count(*) from public.questions q where q.author_id = p.id)::int,
+      (select count(*) from public.answers   a where a.author_id = p.id)::int
+    from public.profiles p
+   order by p.created_at;
+end;
+$$;
+
+grant execute on function public.weekly_stats() to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 15.1 权限回顾：谁能管谁（第 13.6 节的 can_manage 已经这么实现了，这里只是写清楚）
+--        普通用户 → 谁也管不了
+--        管理者   → **只能管普通用户**（管不了其他管理者，也管不了大管理者）
+--        大管理者 → 能管所有人（除了自己），包括管理者
+-- ---------------------------------------------------------------------------

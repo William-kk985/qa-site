@@ -143,7 +143,7 @@ let identities = [];        // 当前账号绑定了哪些登录方式
 let myAnswers = [];         // 我回答过的（「我的」页面）
 let myViews = [];           // 最近 30 天的浏览记录
 let members = [];           // 成员列表（大管理者面板）
-const ui = { filter: 'new', tag: null, q: '', meTab: 'questions' };
+const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all' };
 let lastViewedId = null;
 let authMode = 'login';
 
@@ -726,6 +726,13 @@ async function openMembers() {
 
   closeProfile();
   $('#members-count').textContent = '';
+
+  // 把上次选的排序 / 筛选恢复回来
+  const sSort = $('#member-sort');
+  const sYears = $('#member-years');
+  if (sSort) sSort.value = ui.memberSort;
+  if (sYears) sYears.value = ui.memberYears;
+
   $('#member-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#members-mask').classList.remove('hidden');
 
@@ -742,17 +749,39 @@ function closeMembers() { $('#members-mask').classList.add('hidden'); }
 
 function renderMembers() {
   const canEditRoles = myLevel() === 3;
-  $('#members-count').textContent = members.length + ' 人';
-
   const rb = $('#remind-incomplete');
   if (rb) rb.classList.toggle('hidden', !canEditRoles);
 
-  // 本周最活跃的排前面
-  const sorted = members.slice().sort((a, b) =>
-    (b.questions_this_week + b.answers_this_week) - (a.questions_this_week + a.answers_this_week)
-    || String(a.real_name || a.display_name || '').localeCompare(String(b.real_name || b.display_name || '')));
+  const nameOf = m => String(m.real_name || m.display_name || '');
 
-  $('#member-list').innerHTML = sorted.map(m => {
+  /* ---- 筛选：参赛年数 ---- */
+  let list = members.slice();
+  if (ui.memberYears === 'none') {
+    list = list.filter(m => m.comp_years === null || m.comp_years === undefined);
+  } else if (ui.memberYears !== 'all') {
+    const min = Number(ui.memberYears);
+    list = list.filter(m => (m.comp_years || 0) >= min);
+  }
+
+  /* ---- 排序：本周活跃 / 提问数 / 回答数 / 参赛年份 / 姓名 ---- */
+  const num = v => (v === null || v === undefined ? -1 : Number(v));
+  const sorters = {
+    week:      (a, b) => (b.questions_this_week + b.answers_this_week) - (a.questions_this_week + a.answers_this_week),
+    questions: (a, b) => num(b.questions_total) - num(a.questions_total),
+    answers:   (a, b) => num(b.answers_total) - num(a.answers_total),
+    years:     (a, b) => num(b.comp_years) - num(a.comp_years),
+    name:      (a, b) => nameOf(a).localeCompare(nameOf(b), 'zh'),
+  };
+  const cmp = sorters[ui.memberSort] || sorters.week;
+  list.sort((a, b) => cmp(a, b) || nameOf(a).localeCompare(nameOf(b), 'zh'));
+
+  $('#members-count').textContent = list.length === members.length
+    ? members.length + ' 人'
+    : `${list.length} / ${members.length} 人`;
+
+  const dash = v => (v === null || v === undefined ? '—' : v);
+
+  $('#member-list').innerHTML = list.length ? list.map(m => {
     const isSelf = me && m.user_id === me.id;
 
     const who = m.real_name
@@ -772,14 +801,14 @@ function renderMembers() {
       <div class="member-info">
         <div class="member-name">${who}${roleBadge(m)}${isSelf ? '<span class="faint">（我）</span>' : ''}</div>
         <div class="member-meta">
-          <span>参赛 ${m.comp_years === null || m.comp_years === undefined ? '未填' : m.comp_years + ' 年'}</span>
-          <span>·</span><span>本周提问 <b>${m.questions_this_week}</b></span>
-          <span>·</span><span>本周回答 <b>${m.answers_this_week}</b></span>
+          <span>参赛 ${dash(m.comp_years)}${m.comp_years === null || m.comp_years === undefined ? '' : ' 年'}</span>
+          <span>·</span><span>提问 <b>${dash(m.questions_total)}</b>（本周 ${dash(m.questions_this_week)}）</span>
+          <span>·</span><span>回答 <b>${dash(m.answers_total)}</b>（本周 ${dash(m.answers_this_week)}）</span>
         </div>
       </div>
       ${btns ? `<div class="member-actions">${btns}</div>` : ''}
     </div>`;
-  }).join('');
+  }).join('') : '<div class="faint" style="font-size:13px;padding:14px 0">没有符合条件的成员。</div>';
 }
 
 /* ------------------------------ 页面：列表 ------------------------------ */
@@ -1453,6 +1482,12 @@ $('#notice-mask').addEventListener('click', e => {
 
 $('#members-mask').addEventListener('click', e => {
   if (e.target.id === 'members-mask') closeMembers();
+});
+
+/* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */
+document.addEventListener('change', e => {
+  if (e.target.id === 'member-sort') { ui.memberSort = e.target.value; renderMembers(); }
+  if (e.target.id === 'member-years') { ui.memberYears = e.target.value; renderMembers(); }
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */

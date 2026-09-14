@@ -200,6 +200,27 @@
     <p class="modal-sub">
       本周 = 从周一算起。真实姓名只有管理者看得到；「普通用户 / 管理者 / 大管理者」三个按钮只有大管理者能点。
     </p>
+
+    <div class="member-toolbar">
+      <label>排序
+        <select id="member-sort">
+          <option value="week">本周最活跃</option>
+          <option value="questions">提问数（累计）</option>
+          <option value="answers">回答数（累计）</option>
+          <option value="years">参赛年份</option>
+          <option value="name">姓名</option>
+        </select>
+      </label>
+      <label>参赛年数
+        <select id="member-years">
+          <option value="all">全部</option>
+          <option value="none">未填</option>
+          <option value="1">≥ 1 年</option>
+          <option value="2">≥ 2 年</option>
+          <option value="3">≥ 3 年</option>
+        </select>
+      </label>
+    </div>
     <div class="member-list" id="member-list"></div>
     <div class="modal-actions">
       <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
