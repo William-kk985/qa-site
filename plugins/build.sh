@@ -48,7 +48,10 @@ ld_args() { [ -n "$WASM_LD_DIR" ] && printf -- '-B%s' "$WASM_LD_DIR"; }
 if want moonbit; then
   if have "$MOON"; then
     echo "▶ MoonBit …"
-    if ( cd "$HERE/moon" && "$MOON" build --target wasm --release 2>/dev/null || "$MOON" build --target wasm ) \
+    # --strip 在当前 MoonBit 版本上实测无效（473 字节没变，name/producers 段照旧），
+    # 但写上无害，以后版本支持了就自动生效。
+    if ( cd "$HERE/moon" && "$MOON" build --target wasm --release --strip 2>/dev/null \
+         || "$MOON" build --target wasm --strip ) \
        && { SRC="$HERE/moon/_build/wasm/release/build/example/example.wasm"
             [ -f "$SRC" ] || SRC="$HERE/moon/_build/wasm/debug/build/example/example.wasm"
             cp "$SRC" "$OUT/moonbit.wasm"; }; then
@@ -66,8 +69,12 @@ fi
 if want c; then
   if have "$CLANG"; then
     echo "▶ C …"
-    if "$CLANG" --target=wasm32 -nostdlib -O2 $(ld_args) \
-         -Wl,--no-entry -Wl,--export=theme -Wl,--export=hot_score \
+    # -Oz 体积优先；--strip-all 去掉 name / producers 这两个元数据段。
+    # ⚠️ 不加 --strip-all 会白扛 114 字节（386 → 268）—— 之前就是漏了它，
+    #    导致"Rust 比 C 小"这个结论其实是构建参数造成的假象，不是语言差异。
+    if "$CLANG" --target=wasm32 -nostdlib -Oz $(ld_args) \
+         -Wl,--no-entry -Wl,--strip-all \
+         -Wl,--export=theme -Wl,--export=hot_score \
          -o "$OUT/c.wasm" "$HERE/c/example.c" 2>"$OUT/.c.log"; then
       BUILT+=("c")
     else
@@ -82,8 +89,9 @@ fi
 if want cpp; then
   if have "$CLANGXX"; then
     echo "▶ C++ …"
-    if "$CLANGXX" --target=wasm32 -nostdlib -O2 $(ld_args) \
-         -Wl,--no-entry -Wl,--export=theme -Wl,--export=hot_score \
+    if "$CLANGXX" --target=wasm32 -nostdlib -Oz $(ld_args) \
+         -Wl,--no-entry -Wl,--strip-all \
+         -Wl,--export=theme -Wl,--export=hot_score \
          -o "$OUT/cpp.wasm" "$HERE/cpp/example.cpp" 2>"$OUT/.cpp.log"; then
       BUILT+=("cpp")
     else

@@ -73,7 +73,9 @@ qa-site/
 │   └── VERSION.txt       库的版本号
 ├── supabase/
 │   └── schema.sql        ← 建表 + 权限规则，粘到 Supabase 的 SQL Editor 里运行
-└── .preview/             本地测试脚本和截图（已 gitignore，不会上传）
+├── plugins/              ← 各语言示例插件 + 构建/校验脚本（见 plugins/README.md）
+├── tests/                ← 验收测试（17 个脚本，对着真实后端跑，见 tests/README.md）
+└── .preview/             本地调试草稿和截图（已 gitignore，不会上传）
 ```
 
 ## 关于那两个 key 的安全性
@@ -256,8 +258,8 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 |---|---|---|---|
 | MoonBit | `.wasm` | wasm | 473 B |
 | Rust | `.wasm` | wasm | **274 B** |
-| C | `.wasm` | wasm | 386 B |
-| C++ | `.wasm` | wasm | 386 B |
+| C | `.wasm` | wasm | **268 B** |
+| C++ | `.wasm` | wasm | **268 B** |
 | TypeScript | `.js` | js | 472 B |
 | ReScript | `.mjs` | js | 590 B |
 | JavaScript | 不用编 | js | 2329 B |
@@ -271,7 +273,7 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 **它会断言 8 种语言的产物输出逐位完全相同**，这才是"换语言零成本"的真正证据：
 
 ```
-  c               wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
+  c               wasm   268 B     152, 0.62, 0.42, 2        12.727272727272727
   rust            wasm   274 B     152, 0.62, 0.42, 2        12.727272727272727
   typescript      js     472 B     152, 0.62, 0.42, 2        12.727272727272727
   ……
@@ -433,7 +435,8 @@ GitHub Pages 免费版只能用**公开仓库**，所以这个仓库里的一切
 | 前端全部代码 | ✅ 安全 | 里面没有任何密钥 |
 | **`service_role` key / `sb_secret_...`** | ❌ **绝对不能提交** | 它能**绕过所有 RLS**，等于数据库裸奔。一旦进了 git 历史，删文件也没用，必须去 Supabase 后台**轮换（rotate）**掉 |
 | 数据库密码 | ❌ 绝不能提交 | 同上 |
-| 测试脚本里的真实邮箱 / 密码 | ❌ 绝不能提交 | 本项目的 `.preview/` 就是放这些的，已经在 `.gitignore` 里，**永远不要 `git add -f`** |
+| 测试脚本里的真实邮箱 / 密码 | ❌ 绝不能提交 | `.preview/` 是放这些的（已 gitignore，**永远不要 `git add -f`**）。而 **`tests/` 是会提交的**，所以它的凭据一律走 `QA_EMAIL` / `QA_PASS` 环境变量 —— 任何文件里都不许出现真实密码 |
+| `tests/.tmp/` 里的运行日志 | ❌ 不能提交 | 日志里会有页面输出（可能带真实邮箱），已由 `tests/.gitignore` 忽略 |
 | 提交作者邮箱 | ⚠️ 会公开 | 每个 commit 都带着 `user.email` |
 
 ### 介意提交邮箱被公开怎么办

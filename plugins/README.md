@@ -154,14 +154,94 @@ hot_score(votes, answers, views, age_days) -> number
 **你只负责「算数字」，翻译成 CSS 由通用 JS 干。** 这就是为什么换语言几乎零成本 ——
 MoonBit 编的、Rust 编的、TypeScript 编的，`theme(i)` 出来都是同样的数字，JS 那边一视同仁。
 
-> 想输出**任意 CSS**（不只是这 8 个槽位）也不需要写插件 —— 「看源码」页签旁边那个
-> 自定义 CSS 输入框就是干这个的，直接写 CSS 更省事。
+> 想输出**任意 CSS**（不只是这 8 个槽位）也不需要写插件 —— 外观面板里那个
+> 自定义 CSS 输入框就是干这个的，直接写 CSS 更省事。见下一节。
 
 CSS 优先级链（后面的盖前面的）：
 
 ```
 站点默认  <  外观参数  <  插件生成的外观  <  你自己的自定义 CSS  <  自定义 JS
 ```
+
+---
+
+## 「花边 / 背景 / 卡通形象」怎么做
+
+插件那 8 个槽位是**纯数字**的，做不了这些。但**根本不用写插件** ——
+外观面板 →「进阶：自己写 CSS / JS」→ 直接贴 CSS，任意样式都能改。
+下面这几段都在浏览器里实测过（`check-custom-css-power.mjs`，9/9）。
+
+### ① 换背景
+
+```css
+body {
+  /* 渐变背景 */
+  background-image:
+    radial-gradient(900px 420px at 8% 0%, rgba(79,70,229,.12), transparent 70%),
+    radial-gradient(700px 400px at 92% 6%, rgba(219,39,119,.12), transparent 70%),
+    linear-gradient(180deg, #f7f8fc, #e9edf7);
+  background-attachment: fixed;      /* 滚动时背景不动 */
+}
+```
+
+用图片就把最后那行换成 `url('图片地址')`，再配 `background-size: cover`。
+（图片地址可以是网上的，也可以是自己转的 data URI。）
+
+### ② 加花边
+
+```css
+/* 双层描边 + 外发光 */
+.qcard {
+  border: 2px solid color-mix(in srgb, var(--primary) 55%, var(--border));
+  box-shadow: 0 0 0 3px var(--surface),
+              0 0 0 5px color-mix(in srgb, var(--primary) 32%, transparent),
+              0 10px 26px rgba(16,24,40,.10);
+  position: relative;
+  overflow: hidden;
+}
+/* 顶部一条彩色横条（用伪元素画，不占布局） */
+.qcard::before {
+  content: "";
+  position: absolute; inset: 0 0 auto 0; height: 4px;
+  background: linear-gradient(90deg, #4f46e5, #db2777, #f59e0b);
+}
+```
+
+`border-image` 能做花纹边框，`::before/::after` 能加角标、贴纸、丝带。
+（查过：站内只有 `.divider` 用了伪元素，`.qcard::before` 是空的，随便用。）
+
+### ③ 加卡通形象
+
+```css
+/* 最省事：emoji，不用任何图片文件 */
+.brand::after { content: "🐱"; font-size: 20px; margin-left: 6px; }
+
+/* 真图片：右下角固定贴一个，用内联 SVG 所以不依赖外网 */
+body::after {
+  content: "";
+  position: fixed; right: 16px; bottom: 14px;
+  width: 58px; height: 58px;
+  z-index: 5; pointer-events: none;        /* 别挡住点击 */
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%234f46e5'/><circle cx='36' cy='42' r='7' fill='white'/><circle cx='64' cy='42' r='7' fill='white'/><path d='M32 62 Q50 78 68 62' stroke='white' stroke-width='6' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+}
+```
+
+想换成自己的图：把 `url(...)` 里那串换成 `url('https://.../cat.png')` 就行。
+`pointer-events: none` 别忘了 —— 不然它会挡住底下的按钮。
+
+### 常用变量（改配色不用猜）
+
+`--bg` 页面底色 · `--surface` 卡片底色 · `--border` 描边 · `--text` 正文 ·
+`--primary` 主题色 · `--primary-soft` 主题淡色 · `--radius` 圆角 ·
+`--shadow` / `--shadow-lg` 阴影 · `--role-admin` / `--role-super` 角色徽章色
+
+### 需要注意
+
+- 这些样式**只在你自己的浏览器里生效**，别人看不到（和其它自定义一样）
+- 手机上记得看一眼：花边/宽度别把内容挤出屏幕（测试里有一项专门盯这个）
+- 改坏了点「一键还原」，或网址后加 `?reset=1`
+- 想**动态**改（比如按时间换配色、点击换主题），用同一个面板里的**自定义 JS**
+  —— 它刷新后跑一次，能操作 DOM、能注入事件监听
 
 ---
 
@@ -447,8 +527,8 @@ node plugins/verify.mjs
 ```
   语言/文件           后端     体积        槽位 0–3                    hot_score(1,2,100,3)
   ────────────────────────────────────────────────────────────────────────────
-  c               wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
-  cpp             wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
+  c               wasm   268 B     152, 0.62, 0.42, 2        12.727272727272727
+  cpp             wasm   268 B     152, 0.62, 0.42, 2        12.727272727272727
   javascript      js     2329 B    152, 0.62, 0.42, 2        12.727272727272727
   moonbit         wasm   473 B     152, 0.62, 0.42, 2        12.727272727272727
   python          py     3347 B    152, 0.62, 0.42, 2        12.727272727272727
@@ -472,15 +552,27 @@ node plugins/verify.mjs
 
 同一份逻辑，各语言编出来的体积差 10 倍。**都不用为体积挑语言**（上限是 512KB）：
 
-| 语言 | 实测 | 为什么 |
+| 语言 | 实测 | 说明 |
 |---|---|---|
-| **Rust** | **274 B** | 最小。`opt-level="z"` + `lto` + `strip` + `panic="abort"` 把能砍的都砍了 |
-| C / C++ | 386 B | 直接编机器码，没有运行时 |
-| **TypeScript** | **472 B** | 编成 JS。tsconfig 里开了 `removeComments: true`，注释不进产物 |
-| MoonBit | 473 B | 同样很干净 |
-| ReScript | 590 B | 编成 JS，ReScript 编译器本来就会丢掉注释 |
+| **C / C++** | **268 B** | 最小。真·没有运行时，机器码只有 ~110 字节 |
+| **Rust** | **274 B** | 机器码 ~113 字节，和 C 基本一样 |
+| **TypeScript** | **472 B** | 编成 JS。tsconfig 开了 `removeComments`，注释不进产物 |
+| MoonBit | 473 B | **机器码本身就有 ~266 字节**（C/Rust 的 2.4 倍），另外还带着 101 字节元数据 |
+| ReScript | 590 B | 编成 JS，ReScript 本来就会丢注释 |
 | JavaScript | 2329 B | 不经过编译，是源码原样拷过去的，整篇讲解都在 |
 | Python | 3347 B | 同上（源码即产物）。**但这只是源码** —— 运行时另有 12MB |
+
+> ### 别把这张表当成"语言优劣"
+> 我们一开始排出的是「Rust 274 < C 386」，看着像 Rust 赢了。**拆开 wasm 的段结构才发现是假的**：
+> C 的机器码其实**比 Rust 还小**（110 vs 113 字节），多出来的 118 字节全是
+> `name` / `producers` 两个**元数据段** —— 因为 Cargo.toml 里写了 `strip = true`，
+> 而我们的 clang 命令漏了 `-Wl,--strip-all`。
+>
+> 补上之后 C/C++ 是 **268 字节**，反超 Rust。**所以那点差距是构建参数，不是语言差异。**
+>
+> 真正算"语言差异"的是 **MoonBit**：它的机器码是 266 字节，确实是 C/Rust 的 2.4 倍
+> （而且我们试过 `moon build --strip`，它那 101 字节元数据照旧不删）。
+> 即便如此，473 字节和 268 字节在 512KB 上限面前都是零头 —— **别为体积挑语言**。
 
 > 手写 JS 和 Python 那两份"大"，纯粹因为**它们的注释是给人看的**（源码即产物）。
 > 编译产物（TS / ReScript）不该带注释 —— 注释属于源码，产物是构建结果，
