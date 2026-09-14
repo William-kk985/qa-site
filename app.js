@@ -150,6 +150,139 @@ let myAnswers = [];         // 我回答过的（「我的」页面）
 let myViews = [];           // 最近 30 天的浏览记录
 let members = [];           // 成员列表（大管理者面板）
 let currentQuestion = null; // 当前正在看的问题（编辑时要从这里取原文）
+
+/* ============================================================================
+   自定义外观
+   ----------------------------------------------------------------------------
+   设置只存在**你自己这个浏览器**的 localStorage 里：
+     · 不经过服务器 → 别人看不到、也影响不到别人
+     · 换设备 / 换浏览器要重新设
+     · 正因为如此，这里可以放心让你写 CSS 甚至 JS —— 只在你自己的浏览器里跑
+
+   ⚠️ 逃生通道：万一把界面改坏了，在网址后面加 ?reset=1（或 #reset-theme）即可还原。
+      所以这个判断必须放在最前面，早于 applyTheme()。
+   ============================================================================ */
+const THEME_KEY = 'qa_theme_v1';
+
+try {
+  const sp = new URLSearchParams(location.search);
+  if (sp.get('reset') === '1' || location.hash === '#reset-theme') {
+    localStorage.removeItem(THEME_KEY);
+    history.replaceState(null, '', location.pathname);
+  }
+} catch (_) { /* 无所谓 */ }
+
+const THEME_DEFAULTS = {
+  primary: '',             // 空 = 用主题自带的颜色
+  scheme: 'system',        // system | light | dark
+  font: 15,                // 正文字号 px
+  radius: 12,              // 圆角 px
+  width: 940,              // 页面最大宽度 px
+  density: 'comfortable',  // comfortable | compact | loose
+  css: '',
+  js: '',
+};
+const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
+                       '#dc2626', '#db2777', '#7c3aed', '#475569'];
+
+let theme = { ...THEME_DEFAULTS };
+
+function loadTheme() {
+  try {
+    theme = { ...THEME_DEFAULTS, ...(JSON.parse(localStorage.getItem(THEME_KEY) || '{}')) };
+  } catch (_) {
+    theme = { ...THEME_DEFAULTS };
+  }
+}
+
+function applyTheme() {
+  const r = document.documentElement;
+
+  // 主题色（inline style 优先级最高，所以能盖过浅色/深色两套默认值）
+  if (theme.primary) {
+    r.style.setProperty('--primary', theme.primary);
+    r.style.setProperty('--primary-soft', `color-mix(in srgb, ${theme.primary} 14%, transparent)`);
+  } else {
+    r.style.removeProperty('--primary');
+    r.style.removeProperty('--primary-soft');
+  }
+
+  // 明暗：system 时去掉属性，交给 CSS 的媒体查询
+  if (theme.scheme === 'system') r.removeAttribute('data-theme');
+  else r.setAttribute('data-theme', theme.scheme);
+
+  r.style.setProperty('--base-font', theme.font + 'px');
+  r.style.setProperty('--radius', theme.radius + 'px');
+  r.style.setProperty('--maxw', theme.width + 'px');
+  r.setAttribute('data-density', theme.density);
+
+  // 自定义 CSS：注入一个 <style>（只当文本用，不做 HTML 解析）
+  let el = document.getElementById('qa-custom-css');
+  if (theme.css && theme.css.trim()) {
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'qa-custom-css';
+      document.head.appendChild(el);
+    }
+    el.textContent = theme.css;
+  } else if (el) {
+    el.remove();
+  }
+}
+
+function saveTheme() {
+  try { localStorage.setItem(THEME_KEY, JSON.stringify(theme)); } catch (_) {}
+}
+
+function resetTheme() {
+  theme = { ...THEME_DEFAULTS };
+  try { localStorage.removeItem(THEME_KEY); } catch (_) {}
+  applyTheme();
+  renderThemeForm();
+  toast('已恢复默认外观');
+}
+
+/* 自定义 JS 只在**页面加载时**跑一次（保存后刷新生效），避免重复绑定事件 */
+function runThemeJs() {
+  if (!theme.js || !theme.js.trim()) return;
+  try {
+    new Function(theme.js)();
+  } catch (e) {
+    console.warn('自定义 JS 出错：', e);
+    toast('自定义 JS 出错：' + e.message);
+  }
+}
+
+// 尽早应用，避免页面先闪一下默认样式
+loadTheme();
+applyTheme();
+
+/* ------------------------------ 外观面板 ------------------------------ */
+function renderThemeForm() {
+  if (!$('#theme-primary')) return;
+
+  $('#theme-primary').value = theme.primary || '#4f46e5';
+  $('#theme-presets').innerHTML = THEME_PRESETS.map(c =>
+    `<button type="button" class="theme-dot" data-action="theme-preset" data-c="${c}"
+             style="background:${c}" title="${c}" aria-label="主题色 ${c}"></button>`).join('');
+  $('#theme-scheme').value = theme.scheme;
+  $('#theme-font').value = theme.font;
+  $('#theme-radius').value = theme.radius;
+  $('#theme-width').value = theme.width;
+  $('#theme-density').value = theme.density;
+  $('#theme-font-val').textContent = theme.font + 'px';
+  $('#theme-radius-val').textContent = theme.radius + 'px';
+  $('#theme-width-val').textContent = theme.width + 'px';
+  $('#theme-css').value = theme.css;
+  $('#theme-js').value = theme.js;
+}
+
+function openTheme() {
+  renderThemeForm();
+  $('#theme-mask').classList.remove('hidden');
+}
+
+function closeTheme() { $('#theme-mask').classList.add('hidden'); }
 const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all' };
 let lastViewedId = null;
 let authMode = 'login';
@@ -1340,7 +1473,24 @@ document.addEventListener('click', async e => {
         break;
 
       case 'close-modal':
-        closeAuth(); closeProfile(); closeReset(); closeNotices(); closeMembers(); closeEdit();
+        closeAuth(); closeProfile(); closeReset(); closeNotices(); closeMembers();
+        closeEdit(); closeTheme();
+        break;
+
+      case 'theme':
+        openTheme();
+        break;
+
+      case 'theme-reset':
+        if (!confirm('恢复默认外观？你自己写的 CSS / JS 也会一并清掉。')) return;
+        resetTheme();
+        break;
+
+      case 'theme-preset':
+        theme.primary = el.dataset.c;
+        applyTheme();
+        saveTheme();
+        renderThemeForm();
         break;
 
       case 'me':
@@ -1627,6 +1777,30 @@ $('#members-mask').addEventListener('click', e => {
 
 $('#edit-mask').addEventListener('click', e => {
   if (e.target.id === 'edit-mask') closeEdit();
+});
+
+$('#theme-mask').addEventListener('click', e => {
+  if (e.target.id === 'theme-mask') closeTheme();
+});
+
+/* 外观面板：拖动滑杆 / 改颜色 → 立刻生效 + 立刻存本地 */
+document.addEventListener('input', e => {
+  const id = e.target.id;
+  if (id === 'theme-primary') theme.primary = e.target.value;
+  else if (id === 'theme-font') { theme.font = Number(e.target.value); $('#theme-font-val').textContent = theme.font + 'px'; }
+  else if (id === 'theme-radius') { theme.radius = Number(e.target.value); $('#theme-radius-val').textContent = theme.radius + 'px'; }
+  else if (id === 'theme-width') { theme.width = Number(e.target.value); $('#theme-width-val').textContent = theme.width + 'px'; }
+  else if (id === 'theme-css') theme.css = e.target.value;
+  else if (id === 'theme-js') theme.js = e.target.value;
+  else return;
+
+  applyTheme();
+  saveTheme();
+});
+
+document.addEventListener('change', e => {
+  if (e.target.id === 'theme-scheme') { theme.scheme = e.target.value; applyTheme(); saveTheme(); }
+  if (e.target.id === 'theme-density') { theme.density = e.target.value; applyTheme(); saveTheme(); }
 });
 
 /* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */
@@ -1943,6 +2117,9 @@ window.addEventListener('hashchange', route);
   }
 
   await route();
+
+  // 自定义 JS 放在页面渲染完之后跑（保存后刷新生效）
+  runThemeJs();
 
   if (urlError) {
     history.replaceState(null, '', location.pathname + location.search);

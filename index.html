@@ -45,6 +45,7 @@
 
 <footer class="foot">
   <span>提问和回答都保存在云端，任何人都能看到 · 用 GitHub 账号一键登录，也可以邮箱注册</span>
+  <button class="linkbtn" data-action="theme">自定义外观</button>
 </footer>
 
 <!-- 登录 / 注册弹窗 -->
@@ -127,6 +128,7 @@
         <div>
           <button type="button" class="btn btn-ghost btn-sm hidden" id="members-btn"
                   data-action="members">成员管理</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="theme">自定义外观</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="logout">退出登录</button>
         </div>
@@ -257,6 +259,85 @@
         <button type="submit" class="btn btn-primary">保存修改</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- 自定义外观（只存在你自己的浏览器里） -->
+<div class="modal-mask hidden" id="theme-mask">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h2 class="modal-title">自定义外观</h2>
+      <button type="button" class="linkbtn" data-action="theme-reset">恢复默认</button>
+    </div>
+    <p class="modal-sub">
+      设置只保存在<b>你这台设备的这个浏览器</b>里 —— 不影响别人，换设备要重新设。
+      改坏了点右上角「恢复默认」；万一面板都打不开，在网址后面加 <code>?reset=1</code> 也能还原。
+    </p>
+
+    <div class="theme-grid">
+      <label class="field">
+        <span class="field-label">主题色</span>
+        <span class="theme-color-row">
+          <input type="color" id="theme-primary" aria-label="主题色">
+          <span class="theme-presets" id="theme-presets"></span>
+        </span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">明暗</span>
+        <select id="theme-scheme">
+          <option value="system">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">正文字号 <b id="theme-font-val"></b></span>
+        <input type="range" id="theme-font" min="13" max="19" step="1">
+      </label>
+
+      <label class="field">
+        <span class="field-label">圆角 <b id="theme-radius-val"></b></span>
+        <input type="range" id="theme-radius" min="0" max="20" step="1">
+      </label>
+
+      <label class="field">
+        <span class="field-label">页面宽度 <b id="theme-width-val"></b></span>
+        <input type="range" id="theme-width" min="760" max="1400" step="20">
+      </label>
+
+      <label class="field">
+        <span class="field-label">列表密度</span>
+        <select id="theme-density">
+          <option value="comfortable">标准</option>
+          <option value="compact">紧凑</option>
+          <option value="loose">宽松</option>
+        </select>
+      </label>
+    </div>
+
+    <details class="theme-advanced">
+      <summary>进阶：自己写 CSS / JS（懂前端的再来）</summary>
+      <p class="hint" style="margin:8px 0 12px">
+        这两段代码<b>只在你自己的浏览器里跑</b>，进不了别人的页面，所以随便折腾。
+        CSS 即时生效；<b>JS 刷新后才生效</b>（免得重复绑定事件）。
+      </p>
+      <label class="field">
+        <span class="field-label">自定义 CSS</span>
+        <textarea id="theme-css" spellcheck="false"
+                  placeholder="/* 例：把主色改成红色，卡片加边框 */&#10;:root { --primary: #e11d48; --radius: 4px; }"></textarea>
+      </label>
+      <label class="field">
+        <span class="field-label">自定义 JS</span>
+        <textarea id="theme-js" spellcheck="false"
+                  placeholder="// 例：给页面加一行自己的提示&#10;document.querySelector('.brand-text').textContent = '我们队的问答站';"></textarea>
+      </label>
+    </details>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
+    </div>
   </div>
 </div>
 
