@@ -2493,8 +2493,13 @@ document.addEventListener('change', async e => {
       await loadPlugins();
       applyTheme();            // 插件可能改了外观
       renderPluginStatus();
-      await route();
+      /* ⚠️ toast 要在 route() **之前**发。
+         route() 要重新拉数据重渲染，可能要一两秒；把它排在前面的话，
+         用户紧接着又传了一个坏文件，错误提示会先弹出来，然后这条迟到的
+         "已加载"再把它顶掉 —— 用户看到的就是"提示说加载成功了，可外观没变"。
+         反馈的顺序必须和动作的顺序一致。 */
       toast('插件已加载 —— 只对你自己生效');
+      await route();
     } catch (err) {
       toast('插件加载失败：' + err.message);
     }
