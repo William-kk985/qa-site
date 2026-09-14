@@ -423,6 +423,24 @@ grant select (id, display_name, role, created_at) on public.profiles to anon, au
 - 如果以后配了 QQ 邮箱 SMTP（见上面「忘记密码」那节），验证邮件和找回密码邮件也都能正常发到 QQ 邮箱
 - 配合 GitHub 一键登录，对工科 / 计算机背景的人群覆盖率已经很高
 
+### ⚠️ 用户会收到一封 GitHub 发来的"安全提醒"邮件（正常现象，改不了）
+
+第一次授权 GitHub 登录后，用户邮箱会收到 GitHub 自动发的一封邮件：
+
+> A third-party OAuth application (你的应用名) with user:email scopes was recently
+> authorized to access your account. —— Thanks, The GitHub Team
+
+**这封邮件是 GitHub 平台自己发的，不是本站、也不是 Supabase 发的**：
+
+| 问题 | 答案 |
+|---|---|
+| 内容能改吗 | ❌ 不能。OAuth App 的设置里**没有任何开关**能改内容或关掉它 |
+| 唯一能控制的 | 邮件里显示的**应用名字**（在 GitHub OAuth App 的 Application name 里改） |
+| 会一直发吗 | 一般**只在第一次授权时发一次**；之后正常登录不会重复发（除非用户撤销授权后又重新授权） |
+| 是异常吗 | 完全正常，所有支持"用 GitHub 登录"的网站都会触发 |
+
+**应对办法**：在登录弹窗里提前说明（`index.html` 里 GitHub 按钮下方那段提示），让用户看到邮件时不会慌。
+
 ## 忘记密码 / 修改密码
 
 - **记得密码、只想换一个**：登录后点右上角头像 → 「修改密码」。
