@@ -204,7 +204,17 @@ Supabase 的默认行为是：**同一个邮箱的多个登录方式自动合并
 - 一键**绑定 GitHub** 到现有账号
 - 解绑（**至少保留一个**，否则人会把自己锁在门外）
 
-**要让它能用，先在 Supabase 打开开关**：Authentication → **Settings** → 打开 **Allow manual linking** → Save。
+**要让它能用，先在 Supabase 打开开关**：Authentication → **Configuration**（新版界面在 Manage 分组下；如果那里没有，就在 **Sign In / Providers** 页面的通用开关区找）→ 打开 **`Allow manual linking`** → Save。
+
+> 新版界面里这些开关拆得比较散，容易找错地方，对照一下：
+>
+> | 开关 | 在哪 | 应该是什么 |
+> |---|---|---|
+> | `Allow manual linking` | Authentication → Configuration 或 Sign In / Providers | ✅ 打开 |
+> | `Allow new users to sign up` | 同上 | ✅ 打开（关掉就没人能注册了） |
+> | `Allow anonymous sign-ins` | 同上 | ❌ 关着 |
+> | `Confirm email` | **Sign In / Providers → Email**（provider 自己的配置里） | ❌ 关掉（见上面第 2 步） |
+> | `Allow users without an email` | **Sign In / Providers → GitHub** | ✅ 打开 |
 
 > 说明：一个 GitHub 账号只能绑一个站内账号。如果提示「已经绑在别的账号上了」，得先去那个账号解绑。
 
