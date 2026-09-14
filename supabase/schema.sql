@@ -352,9 +352,15 @@ begin
   end if;
 
   -- 再点一次同一个回答 = 取消
+  --
+  -- ⚠️ 注意右边的 accepted_answer_id 取的是**更新前**的旧值（PostgreSQL 语义）：
+  --    · 旧值 == 这次传的 id → 是"取消"，状态不动（状态归提问者手动控制）
+  --    · 否则 → 是"选上"，顺带把状态改成「已解决」，符合直觉
   update public.questions
      set accepted_answer_id =
-         case when accepted_answer_id = p_answer_id then null else p_answer_id end
+           case when accepted_answer_id = p_answer_id then null else p_answer_id end,
+         status =
+           case when accepted_answer_id = p_answer_id then status else 'solved' end
    where id = p_question_id;
 end;
 $$;
