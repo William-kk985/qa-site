@@ -39,20 +39,24 @@ python3 -m http.server 8123
 
 ### 4. 部署到 GitHub Pages
 
-1. 在 GitHub 建一个**公开**仓库，比如 `qa-site`（免费账号只有公开仓库能开 Pages）。
-2. 推送代码（`index.html` 要在仓库根目录）：
-   ```bash
-   cd qa-site
-   git init -b main
-   git add .
-   git commit -m "问答站"
-   git remote add origin git@github.com:你的用户名/qa-site.git
-   git push -u origin main
-   ```
-   > 建仓库时**不要**勾 Add README / .gitignore / license，否则远端会先有一个提交，push 会被拒绝。
-3. 仓库 **Settings → Pages → Source** 选 `Deploy from a branch`，分支 `main`、目录 `/ (root)`，保存。
-   > 选 **Deploy from a branch**，不要选 GitHub Actions —— 这个项目没有构建步骤。
-4. 等一分钟，访问 `https://你的用户名.github.io/qa-site/`。
+代码已经在 `github.com/William-kk985/qa-site` 上，剩下的只是把 Pages 打开。
+
+**方式一（推荐）：用 GitHub Actions 发布**
+
+1. 仓库 **Settings → Pages**
+2. **Source** 选 **`GitHub Actions`**（不是 `Deploy from a branch`），保存
+3. 去仓库的 **Actions** 标签页，会看到「部署到 GitHub Pages」在跑，约 1 分钟变绿勾
+4. 访问 `https://william-kk985.github.io/qa-site/`
+
+以后每次 `git push` 到 `main` 都会自动重新发布。
+
+**方式二：从分支发布**
+
+仓库 **Settings → Pages → Source** 选 `Deploy from a branch` → 分支 `main` → 目录 `/ (root)` → Save。
+
+> 两者的区别：方式一只发布网页需要的文件（`index.html`、`styles.css`、`app.js`、`config.js`、`vendor/`），`schema.sql` 和 README 不会被放到公网上；方式二会把整个仓库都发布出去。
+
+> ⚠️ 如果这里选 `Deploy from a branch` 时保存失败，就直接用方式一 —— 它不需要选分支和文件夹，少一个出错的地方。
 
 ---
 
