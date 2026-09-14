@@ -1029,7 +1029,13 @@ async function openProfile() {
   $('#profile-form [name=real_name]').value = me.realName || '';
   $('#profile-form [name=comp_years]').value =
     (me.compYears === null || me.compYears === undefined) ? '' : me.compYears;
-  setTimeout(() => $('#profile-form [name=display_name]').focus(), 30);
+
+  /* ⚠️ 手机上**别**自动聚焦：一打开弹窗就弹软键盘，键盘会盖掉半屏，
+     弹窗看起来就像排版坏了（而且用户多半只是想看看，不是来改昵称的）。
+     有真鼠标/触控板的设备上聚焦一下是方便的，保留。 */
+  if (!window.matchMedia('(hover: none)').matches) {
+    setTimeout(() => $('#profile-form [name=display_name]').focus(), 30);
+  }
 
   await api.loadIdentities();
   renderIdentities();

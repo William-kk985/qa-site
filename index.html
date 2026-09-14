@@ -114,9 +114,9 @@
   </div>
 </div>
 
-<!-- 我的账号：改昵称 / 退出登录 -->
+<!-- 我的账号：改昵称 / 登录方式 / 退出登录 -->
 <div class="modal-mask hidden" id="profile-mask">
-  <div class="modal">
+  <div class="modal modal-account">
     <h2 class="modal-title">我的账号</h2>
     <p class="modal-sub">登录邮箱：<b id="profile-email"></b></p>
     <form id="profile-form">
@@ -133,17 +133,9 @@
         <input name="comp_years" type="number" min="0" max="30" placeholder="例如：3">
       </label>
       <p class="form-error hidden" id="profile-error"></p>
-      <div class="modal-actions modal-actions-split">
-        <div>
-          <button type="button" class="btn btn-ghost btn-sm hidden" id="members-btn"
-                  data-action="members">成员管理</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-action="logout">退出登录</button>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
-          <button type="submit" class="btn btn-primary">保存</button>
-        </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
+        <button type="submit" class="btn btn-primary">保存</button>
       </div>
     </form>
 
@@ -151,6 +143,14 @@
       <div class="field-label">登录方式</div>
       <div class="id-list" id="identity-list"></div>
       <p class="hint" id="identity-hint">绑到一起之后，这几种方式都能登进同一个账号，看到的内容也是同一份。</p>
+    </div>
+
+    <!-- 账号级操作：和上面表单的「关闭 / 保存」是两回事，单独一行 -->
+    <div class="acct-actions">
+      <button type="button" class="btn btn-ghost btn-sm hidden" id="members-btn"
+              data-action="members">成员管理</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
+      <button type="button" class="btn btn-danger-ghost btn-sm" data-action="logout">退出登录</button>
     </div>
   </div>
 </div>

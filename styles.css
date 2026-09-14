@@ -569,22 +569,51 @@ h1, h2, h3, p { margin: 0; }
   position: fixed;
   inset: 0;
   background: rgba(12, 14, 18, .5);
-  display: grid;
-  place-items: center;
+  /* ⚠️ 别用 grid + place-items:center。
+     弹窗比视口高的时候（矮窗口、手机横屏、软键盘弹出来），居中会把**顶部**
+     顶到视口外面，而且滚不到 —— 内容就永久够不着了。
+     改成「可滚的 flex + 子元素 margin:auto」：
+       · 空间够 → margin:auto 吃掉剩余空间，照样垂直居中
+       · 空间不够 → auto 边距退化成 0，从顶部开始排，整个遮罩可以滚
+     两者兼顾，也不用碰 100vh 在手机浏览器上的那些坑。 */
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
   z-index: 50;
 }
 .modal {
   width: 100%;
   max-width: 380px;
+  margin: auto;            /* 垂直居中靠它，见上面 mask 的注释 */
   background: var(--surface);
   border-radius: 14px;
   padding: 22px;
   box-shadow: var(--shadow-lg);
+  /* 高度上限 + 自己滚。
+     为什么不让遮罩滚就行：遮罩一旦出滚动条，那 15px 是从**右边**吃掉的，
+     弹窗就会看着偏左（实测窄屏下左 20px / 右 50px）。
+     把滚动收进弹窗内部，遮罩就不用滚，左右留白就对称了。
+     dvh 比 vh 准 —— 手机地址栏收放时 vh 不会跟着变，弹窗底部会被切掉。 */
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
 }
+/* 「我的账号」内容比别的弹窗多（三个输入框 + 登录方式 + 账号操作），
+   380px 太挤，给它宽一点 */
+.modal-account { max-width: 430px; }
 .modal-title { font-size: 17px; font-weight: 700; }
 .modal-sub { font-size: 13px; color: var(--text-dim); margin: 6px 0 16px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+/* flex-wrap：窄屏上按钮排不下时换行，而不是挤出弹窗 */
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
 
 .auth-tabs { margin-bottom: 16px; }
 .auth-tabs .tab { flex: 1; }
@@ -650,7 +679,31 @@ h1, h2, h3, p { margin: 0; }
 .modal.mode-signup .login-only { display: none; }
 
 .modal-actions-split { justify-content: space-between; }
-.modal-actions-split > div { display: flex; gap: 6px; }
+.modal-actions-split > div { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 「我的账号」底部的账号级操作（成员管理 / 修改密码 / 退出登录）。
+   原来它们和表单的「关闭 / 保存」挤在同一行，五个按钮挤成一坨，
+   而且语义完全不同（一个是"改这个表单"，一个是"操作整个账号"）。
+   拆出来单独一行，用分隔线和上面的区块隔开。 */
+.acct-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+/* 退出登录：要让人看出是"破坏性"的，但别做成大红实心按钮抢注意力 */
+.btn-danger-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--danger-text);
+}
+.btn-danger-ghost:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  filter: none;
+}
 
 /* ---------------------------- 站内通知 ---------------------------- */
 .bell-btn { position: relative; padding: 6px 10px; display: inline-flex; align-items: center; }
@@ -1051,4 +1104,15 @@ h1, h2, h3, p { margin: 0; }
   .qcard-side { flex-basis: 48px; }
   .q-head h1 { font-size: 18.5px; }
   .panel { padding: 16px; }
+}
+
+/* 更窄的手机（≤480px）：顶栏那一排在 360px 下会横向溢出，
+   整个页面跟着能左右滚 —— 这是最容易被忽略、又最像"排版坏了"的一种。
+   昵称文字已经在 ≤720px 隐藏了，这里再把角色徽章也收起来，只留头像：
+   点进去就是「我的账号」，角色在那边看得到。 */
+@media (max-width: 480px) {
+  .topbar-actions { gap: 6px; }
+  .user-btn .role-badge { display: none; }
+  .user-btn { padding: 4px 6px; }
+  .app { padding: 14px 12px 46px; }
 }
