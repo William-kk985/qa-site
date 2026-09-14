@@ -258,7 +258,7 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 | Rust | `.wasm` | wasm | **274 B** |
 | C | `.wasm` | wasm | 386 B |
 | C++ | `.wasm` | wasm | 386 B |
-| TypeScript | `.js` | js | 2870 B |
+| TypeScript | `.js` | js | 472 B |
 | ReScript | `.mjs` | js | 590 B |
 | JavaScript | 不用编 | js | 2329 B |
 
@@ -269,7 +269,7 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 ```
   c               wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
   rust            wasm   274 B     152, 0.62, 0.42, 2        12.727272727272727
-  typescript      js     2870 B    152, 0.62, 0.42, 2        12.727272727272727
+  typescript      js     472 B     152, 0.62, 0.42, 2        12.727272727272727
   ……
   ✅ 所有语言编译出来的插件，输出**逐位完全相同**
 ```

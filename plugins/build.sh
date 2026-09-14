@@ -121,7 +121,8 @@ if want ts; then
       cp "$HERE/ts/.out/example.js" "$OUT/typescript.js"
       BUILT+=("ts")
     else
-      FAILED+=("ts")
+      # tsc 把具体错误打在上面了（TS5023 之类），这里只补一句去哪看
+      FAILED+=("ts|tsc 报错，具体见上面的输出|检查 ts/tsconfig.json（注意：JSON 里不能写注释）")
     fi
   else
     SKIPPED+=("ts|没找到 $TSC|npm install typescript")

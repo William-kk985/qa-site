@@ -11,8 +11,10 @@
  *    ReScript 同理 —— 它也编 JS，所以也走这条路。
  *
  * 编译：
- *   tsc example.ts --target es2020 --module es2020 --outDir ../prebuilt-ts
- *   # 然后把 ../prebuilt-ts/example.js 传上去
+ *   tsc -p tsconfig.json --outDir .out      # 用仓库里带的 tsconfig，产物 .out/example.js
+ *
+ *   ⚠️ TypeScript 7 起，目录里有 tsconfig.json 时再在命令行上指定文件会报 TS5112，
+ *      要么走 -p，要么补 --ignoreConfig。
  *
  * 或者直接 `bash plugins/build.sh`。
  *

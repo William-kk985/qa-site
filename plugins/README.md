@@ -276,7 +276,13 @@ double theme(int i) { /* ... */ }
 
 ```bash
 npm install typescript
-tsc example.ts --target es2020 --module es2020    # → example.js，传这个
+
+# 推荐：用仓库里带的那份 tsconfig（直接照抄就能跑）
+cd plugins/ts && tsc -p tsconfig.json --outDir .out
+# 产物 .out/example.js，传这个
+
+# 或者你从零写一个、目录里没有 tsconfig.json 的时候
+tsc example.ts --target es2020 --module es2020
 ```
 
 ```ts
@@ -288,6 +294,20 @@ export function hot_score(votes: number, answers: number, views: number, ageDays
 
 用 `export function` 导出（ES Module）。网站也兼容 CommonJS 的 `module.exports`，
 但 ESM 是推荐写法。
+
+> ⚠️ **别在 `tsconfig.json` 里写注释。** JSON 没有注释语法，常见的 `"//": "说明"`
+> 这种写法会被 TypeScript 当成**未知编译选项**直接报错：
+> `error TS5023: Unknown compiler option '//'`。
+>
+> ⚠️ **TypeScript 7 起还有个新坑**：目录里存在 `tsconfig.json` 时，
+> 再在命令行上直接指定文件会报 `error TS5112`，让你加 `--ignoreConfig`。
+> 所以要么走 `-p tsconfig.json`，要么补上 `--ignoreConfig`：
+>
+> ```bash
+> tsc example.ts --ignoreConfig --target es2020 --module es2020
+> ```
+>
+> （上面这三条写法都在 TypeScript 7.0.2 上实测过。）
 
 ### ReScript
 
@@ -358,7 +378,7 @@ node plugins/verify.mjs
   moonbit         wasm   473 B     152, 0.62, 0.42, 2        12.727272727272727
   rescript        js     590 B     152, 0.62, 0.42, 2        12.727272727272727
   rust            wasm   274 B     152, 0.62, 0.42, 2        12.727272727272727
-  typescript      js     2870 B    152, 0.62, 0.42, 2        12.727272727272727
+  typescript      js     472 B     152, 0.62, 0.42, 2        12.727272727272727
 
   以 c 为基准，比对另外 6 个：
     ✅ cpp 与基准逐位相同
@@ -379,14 +399,14 @@ node plugins/verify.mjs
 |---|---|---|
 | **Rust** | **274 B** | 最小。`opt-level="z"` + `lto` + `strip` + `panic="abort"` 把能砍的都砍了 |
 | C / C++ | 386 B | 直接编机器码，没有运行时 |
+| **TypeScript** | **472 B** | 编成 JS。tsconfig 里开了 `removeComments: true`，注释不进产物 |
 | MoonBit | 473 B | 同样很干净 |
-| ReScript | 590 B | 是 JS，注释被编译器丢掉了，所以比手写那份还小 |
-| JavaScript | 2329 B | 是 JS，**注释原样保留**（源码里全是讲解） |
-| TypeScript | 2870 B | 同上，而且 tsc 默认也不删注释（`removeComments: false`） |
+| ReScript | 590 B | 编成 JS，ReScript 编译器本来就会丢掉注释 |
+| JavaScript | 2329 B | **唯一"大"的那个** —— 它不经过编译，是源码原样拷过去的，整篇讲解都在 |
 
-> 两个 JS 版本"体积大"纯粹是因为**带了一堆注释**。
-> 真在意的话在 `tsconfig.json` 里开 `removeComments: true` 就掉到几百字节 ——
-> 但示例里那些注释是给人看的，故意留着。
+> 只有手写 JS 那份大，纯粹因为**它的注释是给人看的**（那是它的源码）。
+> 编译产物（TS / ReScript）不该带注释 —— 注释属于源码，产物是构建结果，
+> 这也是为什么 `tsconfig.json` 里开了 `removeComments`。
 
 ---
 
