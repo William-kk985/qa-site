@@ -183,6 +183,7 @@ const THEME_DEFAULTS = {
   js: '',
   plugin: '',              // 你自己上传的 .wasm（base64）—— 只在你浏览器里生效
   pluginJs: '',            // 或者你自己上传的 .js（源码原文）—— 和 plugin 二选一
+  pluginPy: '',            // 或者你自己上传的 .py（源码原文）
   pluginName: '',
 };
 const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
@@ -1282,6 +1283,7 @@ function bytesToBase64(bytes) {
    473 字节的文件会显示成 474。 */
 const pluginBytes = () => {
   if (theme.pluginJs) return theme.pluginJs.length;   // JS 存的是源码原文
+  if (theme.pluginPy) return theme.pluginPy.length;   // Python 也是源码原文
   if (!theme.plugin) return 0;
   const padding = (theme.plugin.match(/=*$/) || [''])[0].length;
   return Math.round((theme.plugin.length * 3) / 4) - padding;
@@ -1370,13 +1372,92 @@ function reorderThemeStyles() {
                 wasm 插件做不到这些。所以：只上传你自己写的 / 自己编译的 .js，
                 **别把别人发你的 .js 传进来** —— 那等于把账号交给对方。
 
+   · PY   —— Python。这条路和上面两个都不一样，值得说清楚为什么：
+
+             Python 没法像别的语言那样"编成一个几百字节的产物"。它的**运行时
+             本身就是一大坨 wasm** —— CPython 编成 wasm 的项目叫 Pyodide，
+             核心 9.6MB + 标准库 2.2MB ≈ 12MB。
+
+             12MB 塞不进 localStorage（上限 5MB 左右），也不该提交进仓库。
+             所以：**你上传的只是 .py 源码**（几百字节，照旧只存在你自己浏览器里），
+             运行时则在你真的用了 Python 插件时，才去 CDN 拉一次（之后浏览器会缓存）。
+
+             没装 Python 插件的人一个字节都不会下载 —— 这条线没破。
+
    两边的 ABI 完全相同：导出 theme(i) 和 / 或 hot_score(...)，数字进、数字出。
    所以 app.js 后面那些调用点（wasmThemeToCss / heat）根本不关心插件是什么写的。
    ============================================================================ */
 
 /* 当前插件的后端类型（判断"该按什么格式读"） */
 function pluginKind() {
-  return theme.pluginJs ? 'js' : theme.plugin ? 'wasm' : '';
+  if (theme.pluginPy) return 'py';
+  if (theme.pluginJs) return 'js';
+  return theme.plugin ? 'wasm' : '';
+}
+
+/* ------------------------------- Python 后端 -------------------------------
+   整页只加载一次 Pyodide，之后所有 Python 插件复用它。 */
+const PYODIDE_INDEX = 'https://cdn.jsdelivr.net/pyodide/v0.27.2/full/';
+let pyodide = null;
+let pyodideLoading = null;
+
+function loadScriptOnce(src) {
+  return new Promise((ok, no) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => no(new Error('下载不了 ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensurePyodide() {
+  if (pyodide) return pyodide;
+  if (pyodideLoading) return pyodideLoading;
+
+  pyodideLoading = (async () => {
+    await loadScriptOnce(PYODIDE_INDEX + 'pyodide.js');
+    const py = await window.loadPyodide({ indexURL: PYODIDE_INDEX });
+    console.log('[插件] Pyodide 就绪（Python ' + py.version + '）');
+    pyodide = py;
+    return py;
+  })();
+
+  try {
+    return await pyodideLoading;
+  } catch (e) {
+    pyodideLoading = null;    // 失败就别把失败结果缓存住，下次还能重试
+    throw new Error('Python 运行时（Pyodide，约 12MB）没下载成功：' + e.message
+      + '。它要从 CDN 现拉，需要联网；这次可能是网络问题。');
+  }
+}
+
+/* 跑一段 Python 源码，把里面定义的 theme / hot_score 桥接成同步 JS 函数。
+   ⚠️ 桥接完是**同步**的：Pyodide 加载好之后，从 JS 调 Python 函数不用 await，
+      所以 wasmThemeToCss() / heat() 那些同步调用点一行都不用改。 */
+async function loadPythonPlugin(src) {
+  const py = await ensurePyodide();
+
+  /* 先把上一次插件留下的定义抹掉 —— 否则"只定义了 theme 的新插件"会
+     继续用着上一个插件残留的 hot_score，这是最难查的一类 bug。 */
+  py.runPython('[globals().pop(_n, None) for _n in ("theme", "hot_score")]');
+
+  py.runPython(src);
+
+  const ex = {};
+  for (const name of ['theme', 'hot_score']) {
+    const has = py.runPython(`callable(globals().get(${JSON.stringify(name)}))`);
+    if (!has) continue;
+    const fn = py.globals.get(name);
+    ex[name] = (...args) => {
+      const r = fn(...args);
+      // Python 返回非数字（比如忘了 return → None）时给 NaN，
+      // 上层会当成"这个槽位用默认值"，而不是把界面搞烂
+      return typeof r === 'number' ? r : NaN;
+    };
+  }
+
+  return ex;
 }
 
 /* 加载一个 JS 插件模块，返回它的导出对象。
@@ -1416,7 +1497,9 @@ async function loadPlugins() {
 
   try {
     let ex;
-    if (theme.pluginJs) {
+    if (theme.pluginPy) {
+      ex = await loadPythonPlugin(theme.pluginPy);
+    } else if (theme.pluginJs) {
       ex = await loadJsPlugin(theme.pluginJs);
     } else if (theme.plugin) {
       ex = (await WebAssembly.instantiate(base64ToBytes(theme.plugin), {})).instance.exports;
@@ -1458,13 +1541,20 @@ function renderPluginStatus() {
   if (provide.length) {
     const bytes = pluginBytes();
     const size = bytes < 1024 ? bytes + ' 字节' : Math.round(bytes / 1024) + ' KB';
+    const kind = { js: 'JS', py: 'PY', wasm: 'WASM' }[pluginKind()];
+    /* Python 那条路额外说一句运行时的事 —— 不然用户看到"才 700 字节"
+       会以为 Python 和别的语言一样轻，其实背后还有 12MB 的 Pyodide。 */
+    const extra = pluginKind() === 'py'
+      ? '（运行时要另从 CDN 加载约 12MB 的 Pyodide）'
+      : '';
     el.innerHTML = '🔌 正在用<b>你自己上传的插件</b>：'
       + `<code>${esc(theme.pluginName || '未命名')}</code>`
-      + `（${pluginKind() === 'js' ? 'JS' : 'WASM'}，${size}）`
-      + ` —— 它改的是：<b>${provide.join(' + ')}</b>。<b>只对你自己生效</b>。`;
+      + `（${kind}，${size}）`
+      + ` —— 它改的是：<b>${provide.join(' + ')}</b>。<b>只对你自己生效</b>。`
+      + extra;
   } else {
     el.innerHTML = '🔌 没上传插件，外观和热门排序都用<b>站点默认</b>。'
-      + '想试的话：点下面的「下载示例插件」，再「选择 .wasm / .js 文件」把它传上来。';
+      + '想试的话：点下面的「下载示例插件」，再「选择 .wasm / .js / .py 文件」把它传上来。';
   }
 }
 
@@ -1962,6 +2052,7 @@ document.addEventListener('click', async e => {
       case 'plugin-clear':
         theme.plugin = '';
         theme.pluginJs = '';
+        theme.pluginPy = '';
         theme.pluginName = '';
         saveTheme();
         hotPlugin = null;
@@ -2354,16 +2445,26 @@ document.addEventListener('change', async e => {
       return;
     }
 
-    /* 按扩展名分路：.js / .mjs 走 JS 后端，其它当 wasm。
+    /* 按扩展名分路：.py 走 Python，.js / .mjs 走 JS，其它当 wasm。
        ⚠️ wasm 头 4 个字节固定是 \0asm —— 顺手校验一下，
           否则用户把 .js 改名成 .wasm 会拿到一句看不懂的编译错误。 */
+    const wantPy = /\.py$/i.test(file.name);
     const wantJs = /\.m?js$/i.test(file.name);
     try {
-      if (wantJs) {
+      if (wantPy) {
+        const src = await file.text();
+        /* ⚠️ 这个 await 可能要十几秒 —— 第一次用 Python 插件要现拉 12MB 的
+           Pyodide。所以文件选择框那边先提示了，别让用户以为卡死了。 */
+        await loadPythonPlugin(src);           // 试跑，不合格会抛错
+        theme.pluginPy = src;
+        theme.pluginJs = '';
+        theme.plugin = '';
+      } else if (wantJs) {
         const src = await file.text();
         await loadJsPlugin(src);               // 试加载，不合格会抛错
         theme.pluginJs = src;
-        theme.plugin = '';                     // 和 wasm 二选一
+        theme.pluginPy = '';                   // 三个后端只能留一个
+        theme.plugin = '';
       } else {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -2378,6 +2479,7 @@ document.addEventListener('change', async e => {
         }
         theme.plugin = bytesToBase64(bytes);
         theme.pluginJs = '';
+        theme.pluginPy = '';                   // 三个后端只能留一个
       }
 
       theme.pluginName = file.name;

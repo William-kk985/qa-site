@@ -377,7 +377,7 @@
     <!-- ============ 插件（只对你自己生效） ============ -->
     <div id="theme-pane-plugin" class="hidden">
       <p class="hint" style="margin-bottom:10px">
-        上传一个 <code>.wasm</code> 或 <code>.js</code>，用它替换站点里的<b>外观</b>或<b>排序算法</b>。
+        上传一个 <code>.wasm</code>、<code>.js</code> 或 <code>.py</code>，用它替换站点里的<b>外观</b>或<b>排序算法</b>。
         <b>只存在你自己这个浏览器里，别人拿不到、也影响不到别人</b>；「一键还原」会一并清掉。
       </p>
 
@@ -389,13 +389,25 @@
       </div>
 
       <div class="src-note" style="margin-top:8px">
-        <b>两种后端，ABI 一样</b><br>
+        <b>三种后端，ABI 一样</b><br>
         · <code>.wasm</code> —— 能编 wasm 的语言：<b>MoonBit / C / C++ / Rust / Zig…</b><br>
         &nbsp;&nbsp;跑在 wasm 沙箱里、零外部依赖，<b>碰不到页面</b>。<br>
         · <code>.js</code> —— 只能编 JS 的语言：<b>TypeScript / ReScript / 手写 JS</b><br>
         &nbsp;&nbsp;（tsc → .js，ReScript → .mjs，把编译产物传上来就行）<br>
         &nbsp;&nbsp;⚠️ JS 是<b>跑在页面里</b>的，权限比 wasm 大得多 ——
-        <b>只传你自己写的 / 自己编译的</b>，别把别人发你的 <code>.js</code> 传进来。
+        <b>只传你自己写的 / 自己编译的</b>，别把别人发你的 <code>.js</code> 传进来。<br>
+        · <code>.py</code> —— <b>Python</b>。和其它语言不一样，见下。
+      </div>
+
+      <div class="src-note" style="margin-top:8px">
+        <b>⚠️ 用 Python 之前先看这条</b><br>
+        Python 没法像别的语言那样编成一个几百字节的产物 —— 它的<b>运行时本身就是
+        一大坨 wasm</b>（Pyodide：核心 9.6MB + 标准库 2.2MB ≈ <b>12MB</b>）。<br>
+        所以：<b>你上传的只是 .py 源码</b>（几百字节，照旧只存在你自己浏览器里），
+        运行时只在你真的用了 Python 插件时才去 CDN 拉一次（之后浏览器会缓存）。<br>
+        <b>没装 Python 插件的人一个字节都不会下载。</b><br>
+        代价：第一次用要等十几秒 + 十几 MB 流量，而且要能连上 CDN。
+        <b>只是想改个颜色的话，用别的语言或直接写自定义 CSS 划算得多。</b>
       </div>
 
       <details class="theme-advanced">
@@ -414,13 +426,14 @@
         <a class="btn btn-soft btn-sm" href="plugins/prebuilt/typescript.js" download>TypeScript</a>
         <a class="btn btn-soft btn-sm" href="plugins/prebuilt/rescript.mjs" download>ReScript</a>
         <a class="btn btn-soft btn-sm" href="plugins/prebuilt/javascript.js" download>JS</a>
+        <a class="btn btn-soft btn-sm" href="plugins/prebuilt/python.py" download>Python</a>
       </div>
 
       <div class="src-actions">
-        <button type="button" class="btn btn-soft btn-sm" data-action="plugin-pick">选择 .wasm / .js 文件</button>
+        <button type="button" class="btn btn-soft btn-sm" data-action="plugin-pick">选择 .wasm / .js / .py 文件</button>
         <button type="button" class="btn btn-reset btn-sm" data-action="plugin-clear">移除我的插件</button>
       </div>
-      <input type="file" id="plugin-file" accept=".wasm,.js,.mjs,application/wasm,text/javascript" class="hidden">
+      <input type="file" id="plugin-file" accept=".wasm,.js,.mjs,.py,application/wasm,text/javascript" class="hidden">
     </div>
 
     <div class="modal-actions modal-actions-split">

@@ -13,3 +13,4 @@ rescript/.rescript*
 
 # build.sh 的临时日志
 prebuilt/.*.log
+__pycache__/

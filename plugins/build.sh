@@ -158,6 +158,32 @@ if want js; then
   BUILT+=("js")
 fi
 
+# ----------------------------------------------------------------- Python
+# ⚠️ 和其它语言都不一样：Python **没有"编译产物"**。
+#    页面里跑它的是 Pyodide（CPython 编成的 wasm，约 12MB），那是运行时，
+#    不在这里构建、也不进仓库 —— 真要跑的时候由浏览器从 CDN 现拉。
+#    所以"产物"就是这份 .py 源码本身。
+if want python; then
+  echo "▶ Python（源码即产物，运行时是 CDN 上的 Pyodide）…"
+  if command -v python3 >/dev/null 2>&1; then
+    # 本机先语法自检一下，省得传上去才发现缩进错了。
+    # ⚠️ 用 ast.parse 而不是 py_compile —— 后者是专门用来**写 .pyc** 的，
+    #    它不看 PYTHONDONTWRITEBYTECODE，跑一次就往源码旁边丢个 __pycache__。
+    if python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' \
+         "$HERE/python/example.py" 2>"$OUT/.py.log"; then
+      cp "$HERE/python/example.py" "$OUT/python.py"
+      BUILT+=("python")
+    else
+      FAILED+=("python|语法检查没过|看上面的报错")
+      sed 's/^/    /' "$OUT/.py.log" | head -6
+    fi
+  else
+    cp "$HERE/python/example.py" "$OUT/python.py"
+    BUILT+=("python")
+    echo "    （没有 python3，跳过语法自检）"
+  fi
+fi
+
 rm -f "$OUT"/.*.log 2>/dev/null
 
 # ----------------------------------------------------------------- 报告

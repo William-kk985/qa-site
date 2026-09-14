@@ -3,7 +3,7 @@
 这个目录是给**「不想写 JavaScript，但想给网站加东西」**的人准备的。
 
 把逻辑编译好，在网站的 **「自定义外观」→「插件」** 页签里上传就行。
-**支持 7 种语言**（写法完全等价，随便挑你会的那门）：
+**支持 8 种语言**（写法完全等价，随便挑你会的那门）：
 
 | 语言 | 编成什么 | 后端 | 示例源码 | 编译产物 |
 |---|---|---|---|---|
@@ -14,6 +14,11 @@
 | **TypeScript** | `.js` | js | `ts/example.ts` | `prebuilt/typescript.js` |
 | **ReScript** | `.mjs` | js | `rescript/src/Example.res` | `prebuilt/rescript.mjs` |
 | **JavaScript** | 不用编 | js | `js/example.js` | `prebuilt/javascript.js` |
+| **Python** | 不用编* | py | `python/example.py` | `prebuilt/python.py` |
+
+> \* Python 这一格有点特别：它**没有编译产物**，上传的就是源码本身。
+> 真正的"运行时"是 Pyodide（12MB 的 wasm），不进仓库、按需从 CDN 拉。
+> 详见下面 <a href="#python">Python 那一节</a>。
 
 > `prebuilt/` 里的成品**已经提交进仓库** —— 你不装任何工具链也能点「下载示例插件」直接试用。
 
@@ -35,22 +40,63 @@
 
 ---
 
-## 两种后端：`.wasm` 和 `.js`
+## 三种后端：`.wasm`、`.js` 和 `.py`
 
-网站收两种插件，**ABI（接口约定）完全一样**，只是跑的地方不同：
+网站收三种插件，**ABI（接口约定）完全一样**，只是跑的地方和加载方式不同：
 
-| | `.wasm` | `.js` |
-|---|---|---|
-| 谁走这条 | 能编到 wasm 的语言：MoonBit / Rust / C / C++ / Zig… | 只能编成 JS 的语言：**TypeScript / ReScript** / 手写 JS |
-| 跑在哪 | **wasm 沙箱**，零外部依赖 | **页面里**，和其他脚本同权限 |
-| 能碰页面吗 | ❌ 碰不到（这正是它安全的原因） | ✅ DOM、网络、**你的登录态**，什么都能碰 |
-| 怎么加载 | `WebAssembly.instantiate()` | `Blob` + 动态 `import()` |
-| 大小 | 几百字节起 | 见下面的"体积"一节 |
+| | `.wasm` | `.js` | `.py` |
+|---|---|---|---|
+| 谁走这条 | 能编到 wasm 的：MoonBit / Rust / C / C++ / Zig… | 只能编成 JS 的：**TypeScript / ReScript** / 手写 JS | **Python** |
+| 跑在哪 | **wasm 沙箱**，零外部依赖 | **页面里**，和普通脚本同权限 | **wasm 沙箱**里的 CPython（Pyodide） |
+| 能碰页面吗 | ❌ 碰不到（这正是它安全的原因） | ✅ DOM、网络、**你的登录态**，什么都能碰 | ❌ 碰不到（沙箱） |
+| 怎么加载 | `WebAssembly.instantiate()` | `Blob` + 动态 `import()` | 从 CDN 拉 Pyodide，再跑你的源码 |
+| 上传的是什么 | 编译产物 | 编译产物 | **源码本身** |
+| 大小 | 几百字节起 | 见下面的"体积"一节 | 源码几百字节，**但运行时 12MB** |
+| 额外开销 | 无 | 无 | ⚠️ **第一次用要下 ~12MB** |
 
 > ### 🔒 一句必须记住的话
 > **只上传你自己写的 / 自己编译的 `.js`，别把别人发你的 `.js` 传进来。**
-> wasm 插件有沙箱兜着，最坏也就是算错数；JS 插件**没有沙箱** ——
+> wasm 和 Python 插件都有沙箱兜着，最坏也就是算错数；JS 插件**没有沙箱** ——
 > 别人给的 `.js` 能让它读走你的登录态、拿你的名义发东西。
+
+---
+
+<a id="python"></a>
+## 🐍 Python 为什么和别的语言都不一样
+
+**Python 没法"编译成一个几百字节的产物"。** 它的运行时本身就是一大坨 wasm ——
+CPython 编成 wasm 的项目叫 [Pyodide](https://pyodide.org/)：
+
+| 文件 | 大小 |
+|---|---|
+| `pyodide.asm.wasm`（CPython 本体） | **9.6 MB** |
+| `python_stdlib.zip`（标准库） | **2.2 MB** |
+| 合计 | **≈ 12 MB** |
+
+12MB 塞不进 localStorage（上限 5MB 左右），也不该提交进仓库（谁 clone 都得拖下来）。
+
+所以 Python 这条路是这样走的：
+
+```
+你上传的             →  就是 .py 源码，几百字节
+存哪                 →  照旧只在你自己的 localStorage 里
+运行时               →  **只在你真的用了 Python 插件时**，才去 CDN 拉一次 Pyodide
+                        （拉完浏览器会缓存，同一台机器下次就快）
+没装 Python 插件的人  →  **一个字节都不会下载**，完全不受影响
+```
+
+> **代价说清楚**：第一次用要等十几秒 + 十几 MB 流量，而且依赖 CDN 能不能连上。
+> 如果你只是想改个颜色，**用别的语言（或直接写自定义 CSS）要划算得多**。
+> Python 适合的场景是"我就想用 Python 写这段逻辑"。
+
+**实测**（这台机器，走代理的慢网络）：浏览器里单独下 `pyodide.asm.wasm`
+（10.1MB）用了 **99 秒**，之后 `loadPyodide` + 跑 Python 又用了 76 秒。
+网络正常的话会快得多；而且**第二次打开只要 1 秒**（走浏览器缓存）——
+所以这个代价是"一次性"的，不是每次都要等。
+
+实现上有个值得一提的点：Pyodide 加载好之后，**从 JS 调 Python 函数是同步的**，
+所以 `theme(i)` / `hot_score(...)` 的调用点和别的语言完全一样，一行都不用改。
+（代价是每次调用都要跨一次语言边界，问题数量很大的时候排序会慢一点。）
 
 ---
 
@@ -333,6 +379,35 @@ let hot_score = (votes: float, answers: float, views: float, ageDays: float): fl
 
 不用编译，`js/example.js` 直接传上去就行。用来对照"TS / ReScript 编出来大概长什么样"。
 
+### Python
+
+**也是"不用编译"，但原因和 JS 完全不同** —— 见上面
+[Python 那一节](#python)：页面里跑它的是 Pyodide（12MB 的 wasm），
+所以上传的就是这份源码本身。
+
+```bash
+# 不需要任何构建步骤，把 plugins/python/example.py 传上去就行
+# 想先本地试跑一下（和 Pyodide 里是同一套 CPython 语义）：
+python3 -c "import importlib.util as u; s=u.spec_from_file_location('p','plugins/python/example.py'); \
+m=u.module_from_spec(s); s.loader.exec_module(m); print(m.theme(0), m.hot_score(1,2,100,3))"
+# → 152.0 12.727272727272727
+```
+
+```python
+def theme(i):
+    if i == 0: return 152.0   # 色相：森林绿
+    if i == 3: return 2.0     # 圆角：接近直角
+    return -1.0               # 其余槽位用站点默认
+
+def hot_score(votes, answers, views, age_days):
+    base = votes * 3 + answers * 5 + views / 100
+    return base / (1 + age_days / 30)
+```
+
+> ⚠️ 定义成 **`def theme(i):` / `def hot_score(...)`** 这样的模块级函数就行，
+> 不用 import 任何东西，也不用管怎么导出 —— 名字对上了就能用。
+> 上传时网站会把源码跑一遍，找不到这两个名字之一就会被拒。
+
 ---
 
 ## 一把梭：`build.sh`
@@ -356,7 +431,7 @@ bash plugins/build.sh c rust ts    # 只编指定语言
 | `RESCRIPT` | `rescript` | ReScript 编译器 |
 
 编完会自动跑一遍校验（下面这个）：
-`✅ 7 个插件全部合规，且跨语言输出一致`
+`✅ 8 个插件全部合规，且跨语言输出一致`
 
 ## 校验：`verify.mjs`
 
@@ -376,14 +451,16 @@ node plugins/verify.mjs
   cpp             wasm   386 B     152, 0.62, 0.42, 2        12.727272727272727
   javascript      js     2329 B    152, 0.62, 0.42, 2        12.727272727272727
   moonbit         wasm   473 B     152, 0.62, 0.42, 2        12.727272727272727
+  python          py     3347 B    152, 0.62, 0.42, 2        12.727272727272727
   rescript        js     590 B     152, 0.62, 0.42, 2        12.727272727272727
   rust            wasm   274 B     152, 0.62, 0.42, 2        12.727272727272727
   typescript      js     472 B     152, 0.62, 0.42, 2        12.727272727272727
 
-  以 c 为基准，比对另外 6 个：
+  以 c 为基准，比对另外 7 个：
     ✅ cpp 与基准逐位相同
     ✅ javascript 与基准逐位相同
     ✅ moonbit 与基准逐位相同
+    ✅ python 与基准逐位相同
     ✅ rescript 与基准逐位相同
     ✅ rust 与基准逐位相同
     ✅ typescript 与基准逐位相同
@@ -402,31 +479,46 @@ node plugins/verify.mjs
 | **TypeScript** | **472 B** | 编成 JS。tsconfig 里开了 `removeComments: true`，注释不进产物 |
 | MoonBit | 473 B | 同样很干净 |
 | ReScript | 590 B | 编成 JS，ReScript 编译器本来就会丢掉注释 |
-| JavaScript | 2329 B | **唯一"大"的那个** —— 它不经过编译，是源码原样拷过去的，整篇讲解都在 |
+| JavaScript | 2329 B | 不经过编译，是源码原样拷过去的，整篇讲解都在 |
+| Python | 3347 B | 同上（源码即产物）。**但这只是源码** —— 运行时另有 12MB |
 
-> 只有手写 JS 那份大，纯粹因为**它的注释是给人看的**（那是它的源码）。
+> 手写 JS 和 Python 那两份"大"，纯粹因为**它们的注释是给人看的**（源码即产物）。
 > 编译产物（TS / ReScript）不该带注释 —— 注释属于源码，产物是构建结果，
 > 这也是为什么 `tsconfig.json` 里开了 `removeComments`。
+>
+> ⚠️ 但 Python 那个 3347 B 有误导性：它**只算了源码**。
+> 真正要下载的是 CDN 上 ~12MB 的 Pyodide，那是数量级的差别，别被这个数字骗了。
 
 ---
 
 ## 怎么用网站上传
 
 打开网站 → 顶部 🎨 → 「插件」页签 → 选一个语言的「下载示例插件」→
-「选择 .wasm / .js 文件」把它传上来。
+「选择 .wasm / .js / .py 文件」把它传上来。
 
 上传时会**先试跑一遍**，通过才存进本地：
 
-1. `.wasm`：先看文件头是不是 `\0asm`（不是就提示"这不是 .wasm 文件"），再试着实例化
-2. `.js`：先试 ES Module 加载，不行再试 CommonJS
-3. `theme` 和 `hot_score` 一个都没有 → 拒绝，不会存
-4. 大小上限 512KB
-5. 通过后存进 `localStorage`，立刻生效
+1. **`.py`**：会先拉 Pyodide（⚠️ 第一次要等十几秒），再跑一遍你的源码，
+   看有没有定义 `theme` / `hot_score`
+2. **`.js`**：先试 ES Module 加载，不行再试 CommonJS
+3. **`.wasm`**：先看文件头是不是 `\0asm`（不是就提示"这不是 .wasm 文件"），再试着实例化
+4. `theme` 和 `hot_score` 一个都没有 → 拒绝，不会存
+5. 大小上限 512KB；wasm 存 base64，JS / Python 存源码原文
+6. 通过后立刻生效
+
+> 三种后端**只能有一个生效**：传新的会自动清掉旧的（`plugin` / `pluginJs` / `pluginPy`
+> 三个字段互斥）。「移除我的插件」和「一键还原」也是三个一起清。
 
 上传后状态行会写清楚是哪个后端在干活：
 
 > 🔌 正在用**你自己上传的插件**：`javascript.js`（JS，2329 字节）
 > —— 它改的是：**外观（theme） + 热门排序（hot_score）**。**只对你自己生效**。
+
+Python 的还会额外提醒一句运行时的开销：
+
+> 🔌 正在用**你自己上传的插件**：`python.py`（PY，3347 字节）
+> —— 它改的是：**外观（theme） + 热门排序（hot_score）**。**只对你自己生效**。
+> （运行时要另从 CDN 加载约 12MB 的 Pyodide）
 
 ---
 

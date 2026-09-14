@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PREBUILT = path.join(HERE, 'prebuilt');
@@ -40,10 +41,53 @@ const HOT_CASES = [
 ];
 
 const problems = [];
+const skipped = [];
 const rows = [];
+
+/* ------------------------------------------------------------------------
+   Python 没法在 Node 里跑（页面里跑它的是 Pyodide，那是 12MB 的 wasm 运行时，
+   正是我们不想塞进仓库的东西）。但这份插件是纯数值、不 import 任何模块的，
+   所以**本机的 python3 跑出来的结果和 Pyodide 里的 CPython 是同一个语义** ——
+   拿它来验 ABI 完全够用，而且零依赖、零下载。
+   ------------------------------------------------------------------------ */
+const PY_HARNESS = `
+import json, sys, importlib.util
+spec = importlib.util.spec_from_file_location("qa_plugin", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+out = {
+  "exports": [n for n in ("theme", "hot_score") if callable(getattr(mod, n, None))],
+  "slots": [mod.theme(i) for i in range(8)],
+  "hots": [mod.hot_score(*a) for a in ([1,2,100,3], [0,0,0,0], [10,5,1000,30])],
+}
+print(json.dumps(out))
+`;
+
+function loadPythonPlugin(full, file) {
+  /* ⚠️ PYTHONDONTWRITEBYTECODE：不然 exec_module 会在源码旁边生成
+     __pycache__/*.pyc，跑一次校验就往 prebuilt/ 里塞垃圾文件（踩过）。 */
+  const r = spawnSync('python3', ['-c', PY_HARNESS, full], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+  });
+  if (r.error && r.error.code === 'ENOENT') return { unavailable: '这台机器没有 python3' };
+  if (r.status !== 0) {
+    throw new Error('python3 跑它失败了：' + (r.stderr || '').trim().split('\n').slice(-1)[0]);
+  }
+  const d = JSON.parse(r.stdout);
+  const ex = {};
+  for (const n of d.exports) ex[n] = true;      // 这里只记"有哪些"，数值下面用 d
+  return {
+    ex, imports: [], exports: d.exports,
+    size: fs.statSync(full).size, kind: 'py',
+    slots: d.slots, hots: d.hots,
+  };
+}
 
 async function loadPlugin(file) {
   const full = path.join(PREBUILT, file);
+
+  if (file.endsWith('.py')) return loadPythonPlugin(full, file);
 
   if (file.endsWith('.wasm')) {
     const bytes = fs.readFileSync(full);
@@ -78,7 +122,7 @@ if (!fs.existsSync(PREBUILT)) {
 }
 
 const files = fs.readdirSync(PREBUILT)
-  .filter(f => /\.(wasm|mjs|js)$/.test(f))
+  .filter(f => /\.(wasm|mjs|js|py)$/.test(f))
   .sort();
 
 if (!files.length) {
@@ -89,39 +133,45 @@ if (!files.length) {
 const results = new Map();
 
 for (const file of files) {
-  const label = file.replace(/\.(wasm|mjs|js)$/, '');
+  const label = file.replace(/\.(wasm|mjs|js|py)$/, '');
   try {
     const p = await loadPlugin(file);
 
+    if (p.unavailable) {                       // 比如这台机器没有 python3
+      skipped.push(`${file}（${p.unavailable}）`);
+      continue;
+    }
+
     /* ① 合规性 */
-    if (typeof p.ex.theme !== 'function') problems.push(`${file}: 没有导出 theme`);
-    if (typeof p.ex.hot_score !== 'function') problems.push(`${file}: 没有导出 hot_score`);
+    const has = n => p.exports.includes(n);
+    if (!has('theme')) problems.push(`${file}: 没有导出 theme`);
+    if (!has('hot_score')) problems.push(`${file}: 没有导出 hot_score`);
     if (p.imports.length) {
       problems.push(`${file}: 有外部依赖 ${p.imports.map(i => i.module + '.' + i.name).join(', ')}`
         + '（插件必须是自包含的，零依赖）');
     }
 
-    if (typeof p.ex.theme !== 'function' || typeof p.ex.hot_score !== 'function') continue;
+    if (!has('theme') || !has('hot_score')) continue;
 
-    /* ② 取值 */
-    const slots = SLOTS.map(s => {
-      const v = p.ex.theme(s.i);
+    /* ② 取值。Python 那批已经由 python3 那边算好了（见 loadPythonPlugin） */
+    const call = (name, args) => p.slots ? null : p.ex[name](...args);
+
+    const slots = p.slots || SLOTS.map(s => call('theme', [s.i]));
+    slots.forEach((v, i) => {
+      const s = SLOTS[i];
       if (typeof v !== 'number' || Number.isNaN(v)) {
         problems.push(`${file}: theme(${s.i}) 返回了 ${v}，不是有效数字`);
-        return null;
-      }
-      if (v >= 0 && (v < s.lo || v > s.hi)) {
+      } else if (v >= 0 && (v < s.lo || v > s.hi)) {
         problems.push(`${file}: theme(${s.i}) = ${v} 超出范围 ${s.lo}–${s.hi}`);
       }
-      return v;
     });
 
-    const hots = HOT_CASES.map(c => {
-      const v = p.ex.hot_score(...c.args);
+    const hots = p.hots || HOT_CASES.map(c => call('hot_score', c.args));
+    hots.forEach((v, i) => {
+      const c = HOT_CASES[i];
       if (Math.abs(v - c.want) > 1e-12) {
         problems.push(`${file}: hot_score(${c.args.join(',')}) = ${v}，应该是 ${c.want}`);
       }
-      return v;
     });
 
     results.set(label, { slots, hots, ...p });
@@ -173,6 +223,11 @@ if (labels.length > 1) {
 }
 
 /* ------------------------------------------------------------------ 结论 */
+if (skipped.length) {
+  console.log('\n⏭️  没验成的：');
+  for (const s of skipped) console.log('   · ' + s);
+}
+
 if (problems.length) {
   console.log('\n❌ 有 ' + problems.length + ' 个问题：');
   for (const p of problems) console.log('   · ' + p);
