@@ -71,6 +71,15 @@ function explain(e) {
     return { title: '这个邮箱已经注册过了', detail: '切到「登录」直接进。' };
   if (m.includes('password should be at least'))
     return { title: '密码太短', detail: '至少要 6 位。' };
+  if (m.includes('manual_linking_disabled') || m.includes('manual linking is disabled'))
+    return { title: '绑定功能还没打开',
+      detail: '去 Supabase 的 Authentication → Settings 打开「Allow manual linking」，再回来重试。' };
+  if (m.includes('identity_already_exists') || m.includes('already linked'))
+    return { title: '这个 GitHub 已经绑在别的账号上了',
+      detail: '一个 GitHub 只能绑一个站内账号。要换绑的话，先去原来那个账号里解绑。' };
+  if (m.includes('single identity') || m.includes('unlink'))
+    return { title: '不能解绑最后一个登录方式',
+      detail: '至少得留一个，否则你就进不来了。' };
   if (m.includes('provider is not enabled') || m.includes('unsupported provider'))
     return { title: 'GitHub 登录还没打开',
       detail: '去 Supabase 的 Authentication → Sign In / Providers → GitHub 打开开关并填上 Client ID / Client Secret。' };
@@ -105,6 +114,7 @@ let questions = [];         // 问题列表（来自 questions_view）
 let myVotes = new Set();    // 'q:<id>' / 'a:<id>'
 let myBookmarks = new Set();// 我收藏的问题 id（只有自己看得到）
 let notices = [];           // 站内通知（只有自己看得到）
+let identities = [];        // 当前账号绑定了哪些登录方式
 const ui = { filter: 'new', tag: null, q: '' };
 let lastViewedId = null;
 let authMode = 'login';
@@ -208,6 +218,18 @@ const api = {
         .insert({ question_id: questionId, user_id: me.id });
       if (error) throw error;
       myBookmarks.add(questionId);
+    }
+  },
+
+  /* 登录方式（身份绑定）：读的是 auth 里的 identities，不经过我们的表 */
+  async loadIdentities() {
+    identities = [];
+    try {
+      const { data, error } = await sb.auth.getUserIdentities();
+      if (error) throw error;
+      identities = (data && data.identities) || [];
+    } catch (e) {
+      console.warn('读取登录方式失败：', e.message);
     }
   },
 
@@ -371,13 +393,69 @@ function showAuthError(msg) {
 function hideAuthError() { $('#auth-error').classList.add('hidden'); }
 
 /* ------------------------------ 我的账号弹窗 ------------------------------ */
-function openProfile() {
+
+/* 各种登录方式在界面上的名字和取值方式 */
+const PROVIDER_LABEL = { email: '邮箱', github: 'GitHub', phone: '手机号' };
+
+const GITHUB_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>`;
+
+const identityKey = i => i.identity_id || i.id;
+
+function identityValue(i) {
+  const d = i.identity_data || {};
+  if (i.provider === 'email') return d.email || '';
+  if (i.provider === 'phone') return d.phone || '';
+  if (i.provider === 'github') {
+    const u = d.user_name || d.preferred_username || d.full_name || d.name;
+    return u ? '@' + u : (d.email || '');
+  }
+  return d.email || d.name || '';
+}
+
+function renderIdentities() {
+  const box = $('#identity-list');
+  if (!box) return;
+
+  if (!identities.length) {
+    box.innerHTML = '<div class="faint" style="font-size:13px">读取失败，稍后再试。</div>';
+    return;
+  }
+
+  const hasGithub = identities.some(i => i.provider === 'github');
+  const canUnlink = identities.length > 1;   // 只剩一个时不给解绑，否则人进不来了
+
+  const rows = identities.map(i => `
+    <div class="id-row">
+      <span class="id-provider">${esc(PROVIDER_LABEL[i.provider] || i.provider)}</span>
+      <span class="id-value">${esc(identityValue(i) || '已绑定')}</span>
+      ${canUnlink ? `<button class="linkbtn" data-action="unlink"
+                       data-id="${esc(identityKey(i))}">解绑</button>` : ''}
+    </div>`).join('');
+
+  const addGithub = hasGithub ? '' : `
+    <div class="id-row id-row-add">
+      <button class="btn btn-soft btn-sm" data-action="link-github">
+        ${GITHUB_SVG} 绑定 GitHub 账号
+      </button>
+    </div>`;
+
+  box.innerHTML = rows + addGithub;
+}
+
+async function openProfile() {
   if (!me) return;
+
   $('#profile-email').textContent = me.email || '—';
   $('#profile-form [name=display_name]').value = me.name;
   $('#profile-error').classList.add('hidden');
+  $('#identity-hint').textContent = '绑到一起之后，这几种方式都能登进同一个账号，看到的内容也是同一份。';
+  $('#identity-hint').classList.remove('is-error');
+  $('#identity-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#profile-mask').classList.remove('hidden');
   setTimeout(() => $('#profile-form [name=display_name]').focus(), 30);
+
+  await api.loadIdentities();
+  renderIdentities();
 }
 
 function closeProfile() { $('#profile-mask').classList.add('hidden'); }
@@ -905,8 +983,40 @@ document.addEventListener('click', async e => {
       }
 
       case 'profile':
-        openProfile();
+        await openProfile();
         break;
+
+      case 'link-github': {
+        el.disabled = true;
+        try {
+          // 成功的话浏览器会跳到 GitHub 去授权，回来时就已经绑好了
+          const { error } = await sb.auth.linkIdentity({
+            provider: 'github',
+            options: { redirectTo: location.origin + location.pathname },
+          });
+          if (error) throw error;
+        } catch (err) {
+          const ex = explain(err);
+          const hint = $('#identity-hint');
+          hint.textContent = ex.title + '：' + ex.detail;
+          hint.classList.add('is-error');
+          el.disabled = false;
+        }
+        break;
+      }
+
+      case 'unlink': {
+        const idn = identities.find(x => identityKey(x) === el.dataset.id);
+        if (!idn) return;
+        const label = PROVIDER_LABEL[idn.provider] || idn.provider;
+        if (!confirm(`确定解绑「${label}」？解绑后就不能再用它登录了。`)) return;
+
+        await sb.auth.unlinkIdentity(idn);
+        await api.loadIdentities();
+        renderIdentities();
+        toast('已解绑 ' + label);
+        break;
+      }
 
       case 'del-q': {
         const q = questions.find(x => x.id === el.dataset.q);
