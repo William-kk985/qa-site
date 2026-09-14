@@ -862,6 +862,26 @@ h1, h2, h3, p { margin: 0; }
   margin-bottom: 10px;
 }
 
+/* 插件槽位表 */
+.slot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.slot-table th, .slot-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.slot-table th { color: var(--text-faint); font-weight: 600; }
+.slot-table code {
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.slot-table tbody tr:last-child td { border-bottom: none; }
+
 /* 「找回密码」弹窗里的「没收到邮件怎么办」 */
 .reset-help {
   margin: 4px 0 14px;

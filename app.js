@@ -204,6 +204,25 @@ const JS_SNIPPETS = [
   { label: '控制台打招呼', js: "console.log('这是我自己加的代码，只在我浏览器里跑');" },
 ];
 
+/* ⚠️ 插件的状态和槽位表必须**定义在这里**，不能放下面"插件"那一节：
+   applyTheme() 在模块加载时就会执行，那时候文件后面的 let/const 还在 TDZ 里，
+   会报 "Cannot access 'themePlugin' before initialization"，页面直接卡住。
+   （函数声明会提升，所以函数留在下面那一节没问题。）
+   —— 同一个坑踩过两次了（之前是 renderList 里的 empty）。 */
+let hotPlugin = null;      // 插件①：替换「热门」排序的打分
+let themePlugin = null;    // 插件②：生成整站外观（CSS）
+
+const THEME_SLOTS = [
+  { i: 0, name: '主题色 色相',   lo: 0,   hi: 360,  dflt: 245 },
+  { i: 1, name: '主题色 饱和度', lo: 0,   hi: 1,    dflt: 0.8 },
+  { i: 2, name: '主题色 亮度',   lo: 0.1, hi: 0.95, dflt: 0.55 },
+  { i: 3, name: '圆角',         lo: 0,   hi: 24,   dflt: 12  },
+  { i: 4, name: '页面最大宽度',  lo: 700, hi: 1600, dflt: 940 },
+  { i: 5, name: '正文字号',     lo: 12,  hi: 20,   dflt: 15  },
+  { i: 6, name: '卡片内边距',    lo: 0,   hi: 40,   dflt: 15  },
+  { i: 7, name: '列表间距',     lo: 0,   hi: 30,   dflt: 10  },
+];
+
 let theme = { ...THEME_DEFAULTS };
 
 function loadTheme() {
@@ -251,6 +270,7 @@ function applyTheme() {
     if (!cust) {
       cust = document.createElement('style');
       cust.id = 'qa-custom-css';
+      document.head.appendChild(cust);   // 同上：不插进去就等于没写
     }
     cust.textContent = theme.css;
   } else if (cust) {
@@ -258,10 +278,11 @@ function applyTheme() {
     cust = null;
   }
 
-  // 重新追加到 <head> 末尾来固定顺序（appendChild 对已有元素是"移动"）
-  // 顺序：--- vars --- 然后 --- 自定义 CSS ---
-  document.head.appendChild(vars);
-  if (cust) document.head.appendChild(cust);
+  // 插件生成的外观（如果上传了）
+  applyPluginTheme();
+
+  // 最后统一排一次顺序：站点默认 < 外观参数 < 插件 < 自定义 CSS
+  reorderThemeStyles();
 }
 
 function saveTheme() {
@@ -271,8 +292,15 @@ function saveTheme() {
 function resetTheme() {
   theme = { ...THEME_DEFAULTS };
   try { localStorage.removeItem(THEME_KEY); } catch (_) {}
+
+  // ⚠️ 插件也要一起清掉：theme.plugin 被重置了，但内存里的这两个函数还在，
+  //    不置空的话插件生成的外观会继续生效（踩过）
+  hotPlugin = null;
+  themePlugin = null;
+
   applyTheme();
   renderThemeForm();
+  renderPluginStatus();
   toast('已恢复默认外观');
 }
 
@@ -1235,8 +1263,6 @@ function renderMembers() {
    可替换的：热门排序打分 hot_score(点赞, 回答, 浏览, 距今天数) -> 热度分
    约定见 plugins/README.md
    ------------------------------------------------------------------------- */
-let hotPlugin = null;
-
 function base64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -1252,33 +1278,118 @@ function bytesToBase64(bytes) {
 
 const pluginBytes = () => (theme.plugin ? Math.round((theme.plugin.length * 3) / 4) : 0);
 
+/* ============================================================================
+   通用 JS 映射层：把「各语言编译出来的 wasm」返回的数字翻译成 CSS
+   ----------------------------------------------------------------------------
+   约定：插件导出 theme(i) -> f64，i 是槽位号。
+     · 只要返回几个数字，**不用传字符串、不用管 WASM 内存** →
+       任何语言（Rust / C / Zig / MoonBit / AssemblyScript…）五行就能实现
+     · 返回**负数或 NaN = 这个槽位用站点默认值**，所以可以只改想改的那几个
+     · 越界的值会被夹到合法范围，防止把界面搞烂
+   ============================================================================ */
+/* 把 wasm 的数字算成一组 CSS 变量；没插件时返回 null */
+function wasmThemeToCss() {
+  if (!themePlugin) return null;
+
+  const v = THEME_SLOTS.map(s => {
+    let x = NaN;
+    try { x = Number(themePlugin(s.i)); } catch (_) { /* 报错就当中性 */ }
+    // 负数 / NaN / 无穷 → 用默认；否则夹到范围内
+    return (Number.isFinite(x) && x >= 0) ? Math.min(s.hi, Math.max(s.lo, x)) : s.dflt;
+  });
+
+  const [hue, sat, lum, radius, maxw, font, cardPad, listGap] = v;
+  const hsl = (l, a) => `hsl(${hue} ${sat * 100}% ${l * 100}%${a ? ' / ' + a : ''})`;
+
+  return {
+    '--primary': hsl(lum),
+    '--primary-soft': hsl(lum, 0.14),
+    '--radius': radius + 'px',
+    '--maxw': maxw + 'px',
+    '--base-font': font + 'px',
+    '--card-pad': `${cardPad}px ${Math.round(cardPad * 1.2)}px`,
+    '--list-gap': listGap + 'px',
+  };
+}
+
+/* 建 / 删 #qa-plugin-css（只负责内容，顺序由 reorderThemeStyles 统一排） */
+function applyPluginTheme() {
+  const css = wasmThemeToCss();
+  let el = document.getElementById('qa-plugin-css');
+
+  if (!css) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('style');
+    el.id = 'qa-plugin-css';
+    // ⚠️ 必须插进文档！游离的元素 getElementById 找不到，
+    //    后面的 reorderThemeStyles() 就没法给它排顺序（踩过）
+    document.head.appendChild(el);
+  }
+  el.textContent = ':root { '
+    + Object.entries(css).map(([k, val]) => `${k}: ${val};`).join(' ')
+    + ' }';
+}
+
+/* 三个 <style> 的先后顺序 = CSS 优先级：
+     站点默认  <  外观参数  <  插件  <  你自己的自定义 CSS
+   （appendChild 对已有元素是"移动"，所以按顺序 append 一遍就排好了） */
+function reorderThemeStyles() {
+  ['qa-theme-vars', 'qa-plugin-css', 'qa-custom-css'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) document.head.appendChild(el);
+  });
+}
+
 async function loadPlugins() {
   hotPlugin = null;
-  if (!theme.plugin) return;                 // 没上传 → 用站点默认
+  themePlugin = null;
+  if (!theme.plugin) return;                 // 没上传 → 全用站点默认
 
   try {
     const { instance } = await WebAssembly.instantiate(base64ToBytes(theme.plugin), {});
-    if (typeof instance.exports.hot_score !== 'function') {
-      throw new Error('这个 wasm 没有导出 hot_score');
-    }
-    hotPlugin = instance.exports.hot_score;
-    console.log('[插件] 已加载你自己上传的插件：' + (theme.pluginName || '未命名'));
+    const ex = instance.exports;
+
+    if (typeof ex.theme === 'function') themePlugin = ex.theme;
+    if (typeof ex.hot_score === 'function') hotPlugin = ex.hot_score;
+    if (!themePlugin && !hotPlugin) throw new Error('既没有导出 theme，也没有导出 hot_score');
+
+    console.log('[插件] 已加载你自己上传的插件：' + (theme.pluginName || '未命名')
+      + '（提供 ' + [themePlugin && 'theme', hotPlugin && 'hot_score'].filter(Boolean).join(' + ') + '）');
   } catch (e) {
     console.warn('[插件] 你自己的插件加载失败，改用站点默认：', e.message);
   }
 }
 
+/* 槽位表：直接从 THEME_SLOTS 渲染，永远和代码同步 */
+function renderPluginSlotTable() {
+  const box = $('#plugin-slots');
+  if (!box) return;
+  box.innerHTML = '<table class="slot-table"><thead><tr>'
+    + '<th>i</th><th>是什么</th><th>范围</th><th>默认</th></tr></thead><tbody>'
+    + THEME_SLOTS.map(s =>
+        `<tr><td><code>${s.i}</code></td><td>${esc(s.name)}</td>`
+        + `<td>${s.lo} – ${s.hi}</td><td>${s.dflt}</td></tr>`).join('')
+    + '</tbody></table>';
+}
+
 function renderPluginStatus() {
   const el = $('#plugin-status');
   if (!el) return;
+  renderPluginSlotTable();
 
-  if (hotPlugin) {
-    const kb = pluginBytes();
-    el.innerHTML = '🔌 热门排序正在用 <b>你自己上传的插件</b>：'
+  const provide = [themePlugin && '外观（theme）', hotPlugin && '热门排序（hot_score）'].filter(Boolean);
+
+  if (provide.length) {
+    const bytes = pluginBytes();
+    el.innerHTML = '🔌 正在用<b>你自己上传的插件</b>：'
       + `<code>${esc(theme.pluginName || '未命名')}</code>`
-      + `（${kb < 1024 ? kb + ' 字节' : Math.round(kb / 1024) + ' KB'}，<b>只对你自己生效</b>）`;
+      + `（${bytes < 1024 ? bytes + ' 字节' : Math.round(bytes / 1024) + ' KB'}）`
+      + ` —— 它改的是：<b>${provide.join(' + ')}</b>。<b>只对你自己生效</b>。`;
   } else {
-    el.innerHTML = '🔌 没上传插件，热门排序用的是<b>站点默认公式</b>。'
+    el.innerHTML = '🔌 没上传插件，外观和热门排序都用<b>站点默认</b>。'
       + '想试的话：点下面的「下载示例插件」，再「选择 .wasm 文件」把它传上来。';
   }
 }
@@ -1779,6 +1890,8 @@ document.addEventListener('click', async e => {
         theme.pluginName = '';
         saveTheme();
         hotPlugin = null;
+        themePlugin = null;
+        applyTheme();            // 把插件生成的外观撤掉
         renderPluginStatus();
         await route();
         toast('已移除你自己的插件，回到站点默认');
@@ -2168,13 +2281,15 @@ document.addEventListener('change', async e => {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const { instance } = await WebAssembly.instantiate(bytes, {});
-      if (typeof instance.exports.hot_score !== 'function') {
-        throw new Error('这个 wasm 没有导出 hot_score 函数');
+      const ex = instance.exports;
+      if (typeof ex.theme !== 'function' && typeof ex.hot_score !== 'function') {
+        throw new Error('这个 wasm 既没有导出 theme（外观），也没有导出 hot_score（排序）');
       }
       theme.plugin = bytesToBase64(bytes);
       theme.pluginName = file.name;
       saveTheme();
       await loadPlugins();
+      applyTheme();            // 插件可能改了外观
       renderPluginStatus();
       await route();
       toast('插件已加载 —— 只对你自己生效');
@@ -2449,6 +2564,7 @@ window.addEventListener('hashchange', route);
   if (configError) { renderFatal(configError); renderUserBox(); return; }
 
   await loadPlugins();   // 插件先加载，保证第一次渲染就用上
+  applyTheme();          // 插件可能改了外观，重新应用一次
 
   // 登录 / 找回密码失败时，Supabase 会把原因放进地址栏。先记下来，等会儿弹提示。
   // （注意：不能在这里就把 hash 清掉，SDK 还要靠它读取登录令牌）
