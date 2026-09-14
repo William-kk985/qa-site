@@ -517,6 +517,36 @@ h1, h2, h3, p { margin: 0; }
 .auth-tabs { margin-bottom: 16px; }
 .auth-tabs .tab { flex: 1; }
 
+/* 「用 GitHub 登录」按钮 */
+.btn-github {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 9px 14px;
+  background: #24292f;
+  border-color: #24292f;
+  color: #fff;
+}
+.btn-github:hover { filter: brightness(1.25); }
+.btn-github[disabled] { opacity: .6; }
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.divider::before, .divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 /* 登录模式下不显示「昵称」输入框 */
 .modal.mode-login .signup-only { display: none; }
 

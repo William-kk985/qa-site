@@ -90,6 +90,43 @@ qa-site/
 
 它们能绕过**所有**权限规则，一旦公开等于数据库裸奔。如果哪天不小心贴出去了，去 Supabase 后台把 key 轮换（rotate）掉。
 
+## 用 GitHub 账号登录（推荐，能省掉整个发邮件的问题）
+
+配好之后，用户点一下「用 GitHub 账号登录 / 注册」就进来了——**不用注册、不用记密码、不用收邮件**，而"忘记密码"这个问题直接消失。站长也**完全不用配 SMTP**。
+
+### ① 在 GitHub 上创建一个 OAuth App
+
+1. 打开 https://github.com/settings/developers → 左栏 **OAuth Apps** → **New OAuth App**
+2. 三个框这样填：
+
+   | 字段 | 填什么 |
+   |---|---|
+   | Application name | `问答站` |
+   | Homepage URL | `https://william-kk985.github.io/qa-site/` |
+   | **Authorization callback URL** | `https://csrzcbgfilsdxmkedhns.supabase.co/auth/v1/callback` |
+
+   > ⚠️ 第三个**必须一字不差**，它是 Supabase 的回调地址，不是你的网站地址。填错了会报 `redirect_uri_mismatch`。
+
+3. 点 **Register application**
+4. 页面上显示的 **Client ID** 复制下来
+5. 点 **Generate a new client secret** → 把那串 **Client Secret** 复制下来（**只显示一次**，关掉就再也看不到了，丢了只能重新生成）
+
+### ② 在 Supabase 里打开 GitHub 登录
+
+Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开关 → 把上一步的 **Client ID** 和 **Client Secret** 填进去 → **Save**。
+
+### ③ 试一下
+
+打开网站 → 「登录 / 注册」→「用 GitHub 账号登录 / 注册」→ 在 GitHub 上点 Authorize → 自动跳回网站，已经是登录状态了。
+
+> 说明：第一次用 GitHub 登录会**新建一个账号**。如果 GitHub 上的邮箱和你之前邮箱注册的邮箱是同一个，Supabase 一般会自动关联为同一个账号；否则就是两个独立账号（用哪个登录都行，内容各自独立）。
+
+### ④ 顺便可以做的：让昵称更好看
+
+用 GitHub 登录时，系统会自动拿你的 GitHub 用户名当昵称（见 `schema.sql` 里的 `handle_new_user` 函数）。登录之后点右上角头像也能随时改。
+
+> 配了 GitHub 登录之后，**邮箱注册那条路可以留着当备胎**，也随时可以按上面的「忘记密码」那节把 SMTP 配上。
+
 ## 忘记密码 / 修改密码
 
 - **记得密码、只想换一个**：登录后点右上角头像 → 「修改密码」。
@@ -155,7 +192,7 @@ update auth.users
 
 ## 功能清单
 
-已经有：邮箱注册 / 登录、**忘记密码 / 修改密码**、**改昵称**、提问、回答、点赞（数据库层面防重复）、**收藏问题**（私密，只有自己看得到，有「我的收藏」标签页）、选最佳答案（只有提问者能选）、删除自己的内容、问题列表（最新 / 热门 / 待回答 / 已解决）、标签筛选、搜索、浏览量、深色模式、手机适配。
+已经有：**GitHub 账号一键登录**、邮箱注册 / 登录、**忘记密码 / 修改密码**、**改昵称**、提问、回答、点赞（数据库层面防重复）、**收藏问题**（私密，只有自己看得到，有「我的收藏」标签页）、选最佳答案（只有提问者能选）、删除自己的内容、问题列表（最新 / 热门 / 待回答 / 已解决）、标签筛选、搜索、浏览量、深色模式、手机适配。
 
 还没做（按需要再加）：编辑已发内容、通知、"我的提问"、举报 / 审核、分页（现在一次拉全部，问题上千条要改成分页）、图片上传。
 

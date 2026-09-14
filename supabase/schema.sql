@@ -42,7 +42,8 @@ create policy "资料：只能改自己的" on public.profiles
 
 
 -- 注册时自动建一行 profiles。
--- 昵称优先取注册时填的 display_name，没填就用邮箱 @ 前面的部分。
+-- 昵称的取值顺序：注册时填的 display_name → GitHub 用户名 → 全名 → 邮箱 @ 前面那段。
+-- （用 GitHub 登录的人，Supabase 会把 GitHub 的 user_name / full_name 放进 metadata）
 -- security definer = 这段代码以数据库管理员的身份运行，因此能写进受保护的表。
 create or replace function public.handle_new_user()
 returns trigger
@@ -55,7 +56,11 @@ begin
   values (
     new.id,
     coalesce(
-      nullif(trim(new.raw_user_meta_data ->> 'display_name'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'display_name'), ''),        -- 邮箱注册时自己填的
+      nullif(trim(new.raw_user_meta_data ->> 'user_name'), ''),           -- GitHub 用户名
+      nullif(trim(new.raw_user_meta_data ->> 'preferred_username'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
       split_part(coalesce(new.email, 'user'), '@', 1)
     )
   )

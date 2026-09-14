@@ -71,6 +71,9 @@ function explain(e) {
     return { title: '这个邮箱已经注册过了', detail: '切到「登录」直接进。' };
   if (m.includes('password should be at least'))
     return { title: '密码太短', detail: '至少要 6 位。' };
+  if (m.includes('provider is not enabled') || m.includes('unsupported provider'))
+    return { title: 'GitHub 登录还没打开',
+      detail: '去 Supabase 的 Authentication → Sign In / Providers → GitHub 打开开关并填上 Client ID / Client Secret。' };
   if (m.includes('over_email_send_rate_limit') || m.includes('email rate limit'))
     return { title: '发邮件的额度用完了',
       detail: '免费版内置的发信服务每小时只能发几封邮件，等一小时再试。想稳定收到，按 README 配一个自己的 SMTP（比如 QQ 邮箱）。' };
@@ -276,7 +279,8 @@ async function applySession(session) {
     return;
   }
   const u = session.user;
-  let name = (u.user_metadata && u.user_metadata.display_name)
+  const md = u.user_metadata || {};
+  let name = md.display_name || md.user_name || md.preferred_username || md.full_name || md.name
     || (u.email || '').split('@')[0] || '匿名用户';
 
   try {
@@ -755,6 +759,35 @@ document.addEventListener('click', async e => {
         toast(myBookmarks.has(el.dataset.q) ? '★ 已加入收藏' : '已取消收藏');
         break;
 
+      case 'oauth-github': {
+        const btn = el;
+        btn.disabled = true;
+        hideAuthError();
+        try {
+          // 先问一句 Supabase：GitHub 这个登录方式开了没？
+          // 没开的话点下去会被跳到一坨 JSON 错误页，不如在这里拦下来给个人话提示。
+          const res = await fetch(CFG.SUPABASE_URL + '/auth/v1/settings', {
+            headers: { apikey: CFG.SUPABASE_KEY },
+          });
+          const s = await res.json();
+          if (!s.external || !s.external.github) {
+            throw new Error('Unsupported provider: provider is not enabled');
+          }
+
+          // 成功的话浏览器会直接跳到 GitHub，下面这行不会执行到
+          const { error } = await sb.auth.signInWithOAuth({
+            provider: 'github',
+            options: { redirectTo: location.origin + location.pathname },
+          });
+          if (error) throw error;
+        } catch (err) {
+          const ex = explain(err);
+          showAuthError(ex.title + '：' + ex.detail);
+          btn.disabled = false;
+        }
+        break;
+      }
+
       case 'profile':
         openProfile();
         break;
@@ -1001,6 +1034,14 @@ window.addEventListener('hashchange', route);
 (async function boot() {
   if (configError) { renderFatal(configError); renderUserBox(); return; }
 
+  // 用 GitHub 登录如果失败，Supabase 会把原因放进地址栏。先记下来，等会儿弹提示。
+  // （注意：不能在这里就把 hash 清掉，SDK 还要靠它读取登录令牌）
+  let oauthError = null;
+  try {
+    const p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+    oauthError = p.get('error_description') || p.get('error');
+  } catch (_) {}
+
   let knownUserId = null;
 
   // ⚠️ 必须在调用任何其它 auth 方法**之前**注册监听：
@@ -1043,4 +1084,9 @@ window.addEventListener('hashchange', route);
   }
 
   await route();
+
+  if (oauthError) {
+    history.replaceState(null, '', location.pathname + location.search);
+    toast('GitHub 登录失败：' + oauthError);
+  }
 })();
