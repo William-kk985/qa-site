@@ -1,0 +1,53 @@
+# 把静态站点发布到 GitHub Pages。
+#
+# 为什么用这个而不是「Deploy from a branch」：
+#   1. 不需要在 Pages 设置里选分支和文件夹，少一个出错的环节；
+#   2. 只有真正要发布的文件会被放上去（schema.sql、README 不会被公开）；
+#   3. 以后每次 push 到 main 都会自动重新发布。
+#
+# 用法：仓库 Settings → Pages → Source 选「GitHub Actions」，保存即可。
+
+name: 部署到 GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # 也可以在 Actions 页面手动点一次运行
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+
+      - name: 挑出要发布的文件
+        run: |
+          mkdir -p _site
+          cp -r index.html styles.css app.js config.js vendor .nojekyll _site/
+          echo "将要发布的文件："
+          ls -la _site
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 打包
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: 发布
+        id: deploy
+        uses: actions/deploy-pages@v4
