@@ -1277,12 +1277,12 @@ window.addEventListener('hashchange', route);
 (async function boot() {
   if (configError) { renderFatal(configError); renderUserBox(); return; }
 
-  // 用 GitHub 登录如果失败，Supabase 会把原因放进地址栏。先记下来，等会儿弹提示。
+  // 登录 / 找回密码失败时，Supabase 会把原因放进地址栏。先记下来，等会儿弹提示。
   // （注意：不能在这里就把 hash 清掉，SDK 还要靠它读取登录令牌）
-  let oauthError = null;
+  let urlError = null;
   try {
     const p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
-    oauthError = p.get('error_description') || p.get('error');
+    urlError = p.get('error_description') || p.get('error');
   } catch (_) {}
 
   let knownUserId = null;
@@ -1328,9 +1328,18 @@ window.addEventListener('hashchange', route);
 
   await route();
 
-  if (oauthError) {
+  if (urlError) {
     history.replaceState(null, '', location.pathname + location.search);
-    toast('GitHub 登录失败：' + oauthError);
+
+    const m = urlError.toLowerCase();
+    if (m.includes('expired') || m.includes('invalid')) {
+      // 邮件链接的常见情况：点过第二次、或者点的是更早那封旧邮件
+      toast('这个链接已经失效或已经用过了，请重新申请一封邮件');
+    } else if (m.includes('access_denied')) {
+      toast('授权被拒绝了，请重试');
+    } else {
+      toast('操作失败：' + urlError);
+    }
   }
 
   // 每分钟悄悄刷一次通知，这样别人回答了你的问题，页面上就能看到红点
