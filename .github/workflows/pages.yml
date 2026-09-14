@@ -36,7 +36,7 @@ jobs:
       - name: 挑出要发布的文件
         run: |
           mkdir -p _site
-          cp -r index.html styles.css app.js config.js vendor .nojekyll _site/
+          cp -r index.html styles.css app.js config.js vendor plugins .nojekyll _site/
           echo "将要发布的文件："
           ls -la _site
 

@@ -449,6 +449,8 @@ async function renderSrc() {
                      data-i="${i}" title="${esc(h.sel)}">+ ${esc(h.label)}</button>`).join('');
     }
   }
+
+  renderPluginStatus();
 }
 
 /* 把示例片段渲染成可点的按钮 */
@@ -1208,8 +1210,51 @@ function renderMembers() {
   }).join('') : '<div class="faint" style="font-size:13px;padding:14px 0">没有符合条件的成员。</div>';
 }
 
+/* ------------------------------ WASM 插件位 ------------------------------
+   任何能编译到 WebAssembly 的语言，都可以往 plugins/ 里丢一个 .wasm，
+   替换掉网站里某个纯计算函数。约定见 plugins/README.md。
+
+   当前插件：plugins/hot.wasm（MoonBit 编译，几百字节）→ 热门排序打分
+
+   ⚠️ 三条铁律：
+     · 插件是**可选**的：加载失败 / 文件不存在 → 回落到下面的 JS 实现
+     · 插件里的公式必须和 JS 兜底**完全一致**（不然有无插件排序结果不同）
+     · 插件只做纯计算：数字进、数字出，不碰 DOM、不碰网络
+   ---------------------------------------------------------------------- */
+let hotPlugin = null;
+
+async function loadPlugins() {
+  try {
+    const res = await fetch('plugins/hot.wasm', { cache: 'no-cache' });
+    if (!res.ok) return;                    // 没有这个文件就静默跳过，用 JS
+    const { instance } = await WebAssembly.instantiate(await res.arrayBuffer(), {});
+    if (typeof instance.exports.hot_score === 'function') {
+      hotPlugin = instance.exports.hot_score;
+      console.log('[插件] plugins/hot.wasm 已加载（MoonBit 编译），热门排序用它算');
+    }
+  } catch (e) {
+    console.warn('[插件] plugins/hot.wasm 加载失败，热门排序用 JS 兜底：', e.message);
+  }
+}
+
+function renderPluginStatus() {
+  const el = $('#plugin-status');
+  if (!el) return;
+  el.innerHTML = hotPlugin
+    ? '🔌 热门排序正在用 <b>WASM 插件</b>（<code>plugins/hot.wasm</code>，MoonBit 编译）。'
+    : '🔌 没加载到 WASM 插件，热门排序用的是 <b>JS 兜底实现</b>（功能一样，只是没用上插件）。';
+}
+
 /* ------------------------------ 页面：列表 ------------------------------ */
-const heat = q => q.votes * 3 + q.answerCount * 5 + q.views / 100;
+
+/* 热门排序打分：优先用 WASM 插件，插件没了就用这段 JS —— 两边公式必须一致 */
+function heat(q) {
+  const ageDays = (Date.now() - q.createdAt) / 86400000;
+  if (hotPlugin) {
+    try { return hotPlugin(q.votes, q.answerCount, q.views, ageDays); } catch (_) { /* 掉下去用 JS */ }
+  }
+  return (q.votes * 3 + q.answerCount * 5 + q.views / 100) / (1 + ageDays / 30);
+}
 
 function tagCounts() {
   const counts = new Map();
@@ -2321,6 +2366,8 @@ window.addEventListener('hashchange', route);
 /* ------------------------------ 启动 ------------------------------ */
 (async function boot() {
   if (configError) { renderFatal(configError); renderUserBox(); return; }
+
+  await loadPlugins();   // 插件先加载，保证第一次渲染就用上
 
   // 登录 / 找回密码失败时，Supabase 会把原因放进地址栏。先记下来，等会儿弹提示。
   // （注意：不能在这里就把 hash 清掉，SDK 还要靠它读取登录令牌）

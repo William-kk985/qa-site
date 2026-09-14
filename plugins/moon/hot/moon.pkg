@@ -1,0 +1,3 @@
+// foreign_library = 这个包是给外部（浏览器 / 别的语言）用的库，
+// 里面的 #export_name 函数会被导出到 .wasm 的导出表里。
+pkgtype(kind: "foreign_library")

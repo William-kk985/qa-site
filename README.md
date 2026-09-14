@@ -246,6 +246,54 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 > 现在的实现严格守住"**只存本地、不进服务器**"这条线，所以自定义 JS 是安全的。
 > 要改成同步，请先把上面这张表想清楚。
 
+## 多语言：WASM 插件位
+
+不想写 JavaScript，但想给网站加逻辑？把逻辑编译成 **WebAssembly** 丢进 `plugins/` 就行 ——
+**任何能编到 WASM 的语言都行**：Rust、C/C++、Zig、AssemblyScript、**MoonBit**…
+
+现在已经有一个真的在跑的：
+
+| | |
+|---|---|
+| 插件文件 | `plugins/hot.wasm` |
+| 用什么语言写的 | **MoonBit**（源码 `plugins/moon/hot/hot.mbt`，十几行） |
+| 体积 | **297 字节**，零外部依赖 |
+| 干什么用的 | 「热门」排序的打分：`hot_score(votes, answers, views, age_days) -> f64` |
+| 怎么编译 | `bash plugins/build.sh`（需先装 MoonBit 工具链） |
+
+### 三条铁律（写进 `plugins/README.md` 了）
+
+1. **插件只做纯计算**：数字进、数字出。**不碰 DOM、不发网络请求、不用 WASI**
+   → 边界最简单、任何语言都好实现、坏了也不影响主流程
+2. **必须导出约定的函数签名**
+3. **插件里的公式必须和 JS 兜底完全一致** —— 这样"有插件 / 没插件"结果一样，插件没了能无缝退化
+
+### JS 侧怎么用它（`app.js` 的 `loadPlugins()`）
+
+```js
+hotPlugin = instance.exports.hot_score;   // 加载成功就用插件
+// 加载失败 / 文件不存在 → hotPlugin 保持 null → heat() 自动走 JS 兜底
+```
+
+界面上能看出用的是哪个：「自定义外观」→「看源码」页签里会写
+「🔌 热门排序正在用 **WASM 插件**」还是「JS 兜底实现」。
+
+> ⚠️ **部署时别漏了 `plugins/`** —— `.github/workflows/pages.yml` 里的拷贝列表必须包含它，
+> 否则 wasm 传不上去，网站会**静默退化**成 JS 实现（功能正常，但插件白写了）。
+
+> 💡 想加别的插件？`plugins/README.md` 里有 **Rust 的完整示例**（`wasm32-unknown-unknown`）、
+> C / Zig / AssemblyScript 的编译命令，还有"怎么验证自己编出来的对不对"。
+> 建议先从**纯数字**的插件练手，熟悉了再上字符串（那要自己管 WASM 线性内存）。
+
+### 关于 TypeScript
+
+**没上构建步骤，但也能吃到 TS 的好处**：现在整套是"零构建"的纯静态站，
+引入 `tsc`/vite 会让部署流程多一步、本地要先 `npm install`。
+
+如果想让懂 TS 的人更舒服，**推荐用 JSDoc + `// @ts-check`**：
+文件还是 `.js`，但编辑器里有完整类型提示和报错，CI 里跑一次 `tsc --noEmit` 就能拦住类型错误 ——
+**拿到 TS 90% 的好处，不引入任何构建复杂度**。
+
 ## 源码是公开的：什么安全、什么绝对不能提交
 
 GitHub Pages 免费版只能用**公开仓库**，所以这个仓库里的一切**任何人都能看到**（包括 `config.js` 和 `schema.sql`）。这是设计如此，不是漏洞 —— 但要知道边界在哪：
