@@ -1277,9 +1277,15 @@ function bytesToBase64(bytes) {
   return btoa(s);
 }
 
-const pluginBytes = () => theme.pluginJs
-  ? theme.pluginJs.length
-  : (theme.plugin ? Math.round((theme.plugin.length * 3) / 4) : 0);
+/* 插件体积：wasm 存的是 base64，要还原成原始字节数。
+   ⚠️ 别用 length*3/4 —— 那会把 base64 的 '=' 填充也算成字节，
+   473 字节的文件会显示成 474。 */
+const pluginBytes = () => {
+  if (theme.pluginJs) return theme.pluginJs.length;   // JS 存的是源码原文
+  if (!theme.plugin) return 0;
+  const padding = (theme.plugin.match(/=*$/) || [''])[0].length;
+  return Math.round((theme.plugin.length * 3) / 4) - padding;
+};
 
 /* ============================================================================
    通用 JS 映射层：把「各语言编译出来的 wasm」返回的数字翻译成 CSS
@@ -1302,7 +1308,12 @@ function wasmThemeToCss() {
   });
 
   const [hue, sat, lum, radius, maxw, font, cardPad, listGap] = v;
-  const hsl = (l, a) => `hsl(${hue} ${sat * 100}% ${l * 100}%${a ? ' / ' + a : ''})`;
+  /* ⚠️ 百分比要收一下小数：0.55 * 100 在 IEEE754 里是 55.00000000000001，
+     直接拼进 CSS 会得到 `hsl(152 80% 55.00000000000001%)` ——
+     浏览器能认，但难看，而且会污染测试里读出来的字符串。
+     两位小数对色相/饱和度/亮度来说绰绰有余。 */
+  const pct = x => Math.round(x * 10000) / 100;
+  const hsl = (l, a) => `hsl(${hue} ${pct(sat)}% ${pct(l)}%${a ? ' / ' + a : ''})`;
 
   return {
     '--primary': hsl(lum),
