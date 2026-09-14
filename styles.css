@@ -686,6 +686,21 @@ h1, h2, h3, p { margin: 0; }
 .id-row-add { border-style: dashed; background: transparent; justify-content: center; }
 .hint.is-error { color: #b42318; }
 
+/* 「找回密码」弹窗里的「没收到邮件怎么办」 */
+.reset-help {
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.reset-help b { color: var(--text); font-size: 13px; }
+.reset-help ol { margin: 6px 0 0; padding-left: 18px; }
+.reset-help li { margin-bottom: 2px; }
+
 /* ====================== 小屏 ====================== */
 @media (max-width: 720px) {
   .topbar-inner { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }

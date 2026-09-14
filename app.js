@@ -392,6 +392,38 @@ function showAuthError(msg) {
 }
 function hideAuthError() { $('#auth-error').classList.add('hidden'); }
 
+/* 发起 GitHub 登录。抽出来是因为两个地方要用：
+   「登录 / 注册」弹窗里的按钮，和「忘记密码」弹窗里那句"改用 GitHub 登录"。 */
+async function startGithubLogin(btn) {
+  if (btn) btn.disabled = true;
+  hideAuthError();
+
+  try {
+    // 先问一句 Supabase：GitHub 这个登录方式开了没？
+    // 没开的话点下去会被跳到一坨 JSON 错误页，不如在这里拦下来给个人话提示。
+    const res = await fetch(CFG.SUPABASE_URL + '/auth/v1/settings', {
+      headers: { apikey: CFG.SUPABASE_KEY },
+    });
+    const s = await res.json();
+    if (!s.external || !s.external.github) {
+      throw new Error('Unsupported provider: provider is not enabled');
+    }
+
+    // 成功的话浏览器会直接跳到 GitHub，下面这行不会执行到
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: 'github',
+      options: { redirectTo: location.origin + location.pathname },
+    });
+    if (error) throw error;
+  } catch (err) {
+    const ex = explain(err);
+    const msg = ex.title + '：' + ex.detail;
+    if (!$('#modal-mask').classList.contains('hidden')) showAuthError(msg);
+    else toast(msg);
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* ------------------------------ 我的账号弹窗 ------------------------------ */
 
 /* 各种登录方式在界面上的名字和取值方式 */
@@ -477,6 +509,7 @@ function openReset(mode = 'request') {
     : '填注册时用的邮箱，我们会发一封带重置链接的邮件给你。';
   $('#reset-email-field').classList.toggle('hidden', setMode);
   $('#reset-pass-field').classList.toggle('hidden', !setMode);
+  $('#reset-help').classList.toggle('hidden', setMode);
   $('#reset-submit').textContent = setMode ? '保存新密码' : '发送重置邮件';
   $('#reset-error').classList.add('hidden');
   $('#reset-ok').classList.add('hidden');
@@ -953,34 +986,14 @@ document.addEventListener('click', async e => {
         toast(myBookmarks.has(el.dataset.q) ? '★ 已加入收藏' : '已取消收藏');
         break;
 
-      case 'oauth-github': {
-        const btn = el;
-        btn.disabled = true;
-        hideAuthError();
-        try {
-          // 先问一句 Supabase：GitHub 这个登录方式开了没？
-          // 没开的话点下去会被跳到一坨 JSON 错误页，不如在这里拦下来给个人话提示。
-          const res = await fetch(CFG.SUPABASE_URL + '/auth/v1/settings', {
-            headers: { apikey: CFG.SUPABASE_KEY },
-          });
-          const s = await res.json();
-          if (!s.external || !s.external.github) {
-            throw new Error('Unsupported provider: provider is not enabled');
-          }
-
-          // 成功的话浏览器会直接跳到 GitHub，下面这行不会执行到
-          const { error } = await sb.auth.signInWithOAuth({
-            provider: 'github',
-            options: { redirectTo: location.origin + location.pathname },
-          });
-          if (error) throw error;
-        } catch (err) {
-          const ex = explain(err);
-          showAuthError(ex.title + '：' + ex.detail);
-          btn.disabled = false;
-        }
+      case 'oauth-github':
+        await startGithubLogin(el);
         break;
-      }
+
+      case 'forgot-use-github':
+        closeReset();
+        await startGithubLogin(null);
+        break;
 
       case 'profile':
         await openProfile();

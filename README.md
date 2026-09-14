@@ -268,9 +268,26 @@ Authentication → **URL Configuration**：
 
 > 不配的话，邮件里的链接会跳到 Supabase 默认的 `localhost:3000`，点开是一片空白。
 
-**② 让邮件真的能发出去（重要）**
+**② 让邮件真的能发出去（不做这一步，同学就收不到找回密码的邮件）**
 
-免费版内置的发信服务**每小时只能发几封**、很容易进垃圾箱，对 QQ 邮箱经常直接丢掉。正式用之前建议换成你自己的 QQ 邮箱发信：
+Supabase 的规则（见 [官方文档](https://supabase.com/docs/guides/auth/auth-smtp)）：
+
+> **Send messages only to pre-authorized addresses.** Unless you configure a custom SMTP server for your project, Supabase Auth will **refuse to deliver messages to addresses that are not part of the project's team**. All other addresses will fail with the error message *Email address not authorized.*
+> …**Currently this value is set to 2 messages per hour.**
+
+**实测确认过：**
+
+| 收件人 | 结果 |
+|---|---|
+| 站长自己的邮箱（Supabase 团队成员） | ✅ 真正投递 |
+| 普通同学的邮箱 | ❌ **邮件被服务端丢弃**，但接口照样返回 `200 {}` |
+
+> ⚠️ 因为接口对谁都返回成功（防止被人探测"这个邮箱注册过没有"），**网站察觉不到失败，用户会看到"邮件已发送"然后一直等**。
+>
+> 已经做的兜底：找回密码弹窗里加了「**没收到邮件？**」帮助块，引导到 GitHub 登录或找站长人工重置。
+> **但唯一真正的解法是下面这个 —— 配自定义 SMTP。**
+
+#### 用你自己的 QQ 邮箱发信（免费、国内送达最稳）
 
 1. QQ 邮箱网页版 → **设置 → 账号** → 找到「POP3/IMAP/SMTP 服务」→ **开启**（需要短信验证）→ 拿到一串 **16 位授权码**（注意：不是你的 QQ 密码）
 2. Supabase → **Project Settings → Auth → SMTP Settings** → 打开 **Enable Custom SMTP**：
