@@ -526,6 +526,20 @@ function renderUserBox() {
   renderBell();   // 铃铛跟着登录状态一起更新
 }
 
+/* 资料没补全就在页面顶部提示 —— 所有页面都显示，不只是问题列表页 */
+function renderBanner() {
+  const box = $('#app-banner');
+  if (!box) return;
+
+  const need = me && (!me.realName || me.compYears === null || me.compYears === undefined);
+
+  box.innerHTML = need ? `
+    <div class="noticebar">
+      <span class="grow">📝 你的资料还没填完整（真实姓名 / 参赛年数），补上之后管理者才能统计到你的贡献。</span>
+      <button class="btn btn-soft btn-sm" data-action="profile">去补充</button>
+    </div>` : '';
+}
+
 /* ------------------------------ 登录弹窗 ------------------------------ */
 function openAuth(mode = 'login') {
   authMode = mode;
@@ -919,9 +933,6 @@ function renderList() {
       ? ['没有匹配的问题。', '换个筛选条件试试。']
       : ['还没有人提问。', '点右上角「提问题」，发第一个。'];
 
-  // 资料没填全就顶个提示条（用 GitHub 登录的人一开始都是空的）
-  const needProfile = me && (!me.realName || me.compYears === null || me.compYears === undefined);
-
   const cards = list.length ? list.map(q => `
     <article class="qcard">
       <div class="qcard-side">
@@ -951,12 +962,6 @@ function renderList() {
     </div>`;
 
   $('#app').innerHTML = `
-    ${needProfile ? `
-    <div class="noticebar">
-      <span class="grow">📝 你的资料还没填完整，补上之后管理者才能统计到你的贡献。</span>
-      <button class="btn btn-soft btn-sm" data-action="profile">去补充</button>
-    </div>` : ''}
-
     <section class="stats">
       <div><div class="num">${questions.length}</div><div class="lbl">问题</div></div>
       <div><div class="num">${answers}</div><div class="lbl">回答</div></div>
@@ -1278,6 +1283,7 @@ async function route() {
   }
 
   renderUserBox();
+  renderBanner();
   window.scrollTo({ top: 0 });
 }
 
@@ -1403,8 +1409,11 @@ document.addEventListener('click', async e => {
         break;
 
       case 'remind-incomplete': {
-        if (!confirm('给所有「真实姓名或参赛年数没填」的成员各发一条提醒通知？')) return;
-        const n = await api.remindIncomplete(null);
+        const text = prompt(
+          '给所有「真实姓名或参赛年数没填」的成员各发一条站内通知。\n\n消息内容（留空就用默认的）：',
+          '');
+        if (text === null) return;
+        const n = await api.remindIncomplete(text.trim() || null);
         toast('已提醒 ' + n + ' 人');
         break;
       }

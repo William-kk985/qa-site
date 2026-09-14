@@ -799,6 +799,14 @@ h1, h2, h3, p { margin: 0; }
 .member-actions .btn.is-current { background: var(--primary); border-color: var(--primary); color: #fff; }
 
 /* 资料没补全时顶部的提示条 */
+.app-banner {
+  width: 100%;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 0 18px;
+}
+.app-banner:not(:empty) { padding-top: 18px; }
+
 .noticebar {
   display: flex;
   align-items: center;
