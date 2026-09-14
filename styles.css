@@ -853,6 +853,15 @@ h1, h2, h3, p { margin: 0; }
   margin-top: 10px;
 }
 
+/* 「常用选择器」小抄 */
+.src-pickers {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
 /* 「找回密码」弹窗里的「没收到邮件怎么办」 */
 .reset-help {
   margin: 4px 0 14px;

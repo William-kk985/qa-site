@@ -371,6 +371,22 @@ let srcCache = {};
 let srcCurrent = 'styles.css';
 let srcApplyTimer = null;
 
+/* 常用选择器小抄：点一下就往编辑器里插一条"改这个元素"的规则。
+   为什么要这个：CSS 能改到多深，取决于选择器对不对；让不懂的人去 2 万多行
+   源码里翻是不现实的。 */
+const SELECTOR_HELP = [
+  { sel: '.qcard',       label: '问题卡片' },
+  { sel: '.qcard-side',  label: '卡片左边统计' },
+  { sel: '.stats',       label: '顶部统计条' },
+  { sel: '.tagbar',      label: '标签筛选栏' },
+  { sel: '.tabs',        label: '页签（最新/热门…）' },
+  { sel: '.topbar',      label: '顶栏' },
+  { sel: '.answer',      label: '一条回答' },
+  { sel: '.btn-primary', label: '主按钮' },
+  { sel: '.user',        label: '作者名' },
+  { sel: '.rowcard',     label: '「我的」里的条目' },
+];
+
 async function loadSrc(key) {
   if (srcCache[key] !== undefined) return srcCache[key];
   try {
@@ -420,6 +436,18 @@ async function renderSrc() {
     ta.classList.add('hidden');
     view.classList.remove('hidden');
     view.textContent = text;
+  }
+
+  // 「常用选择器」小抄只在 styles.css（可改的那个）显示
+  const pickers = $('#src-pickers');
+  if (pickers) {
+    pickers.classList.toggle('hidden', !f.editable);
+    if (f.editable) {
+      pickers.innerHTML = '<span class="tagbar-label">常用选择器</span>'
+        + SELECTOR_HELP.map((h, i) =>
+            `<button type="button" class="snippet" data-action="src-selector"
+                     data-i="${i}" title="${esc(h.sel)}">+ ${esc(h.label)}</button>`).join('');
+    }
   }
 }
 
@@ -1655,6 +1683,21 @@ document.addEventListener('click', async e => {
         applyTheme();
         saveTheme();
         toast('已载入线上原版，可以开始改了');
+        break;
+      }
+
+      case 'src-selector': {
+        const h = SELECTOR_HELP[Number(el.dataset.i)];
+        if (!h) return;
+        const ta = $('#src-editor');
+        ta.value = ta.value.replace(/\s+$/, '')
+          + `\n\n/* ===== ${h.label} ===== */\n${h.sel} {\n  /* 在这里写你要改的样式 */\n}`;
+        ta.scrollTop = ta.scrollHeight;
+        theme.css = ta.value;
+        updateThemeConflict();
+        clearTimeout(srcApplyTimer);
+        srcApplyTimer = setTimeout(() => { applyTheme(); saveTheme(); }, 200);
+        toast('已插入 ' + h.sel + ' 的规则，改花括号里的内容就行');
         break;
       }
 
