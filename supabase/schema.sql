@@ -528,3 +528,410 @@ union all select '回答 answers',    count(*) from public.answers
 union all select '点赞 votes',      count(*) from public.question_votes
 union all select '收藏 bookmarks',  count(*) from public.bookmarks
 union all select '通知 notifications', count(*) from public.notifications;
+
+
+-- ============================================================================
+-- 13. 角色权限 + 问题状态 + 浏览记录
+--
+--     这一节是**自包含**的：新字段、新表、新函数、新权限规则全在这里，
+--     后加的功能都集中在这一节，方便接手的人一眼看到"后来改了什么"。
+--
+--     ⚠️ 它会**覆盖**前面几处旧定义，这是故意的：
+--        · 第 1 节「资料：只能改自己的」  → 换成「自己 或 大管理者」
+--        · 第 2 节「问题：只能改自己的」  → 删掉（改状态走函数，防止顺手改浏览量）
+--        · 第 2 节「问题：只能删自己的」  → 加上管理者的分支
+--        · 第 9 节 profiles 的 update 授权 → 收窄成只能改 display_name 一列
+--        · 第 10 节 notifications 的类型约束和视图 → 加新类型和 note 字段
+-- ============================================================================
+
+
+-- ---------------------------------------------------------------------------
+-- 13.1 角色
+--      普通用户 user < 管理者 admin < 大管理者 super_admin
+-- ---------------------------------------------------------------------------
+alter table public.profiles add column if not exists role text not null default 'user';
+
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check
+  check (role in ('user', 'admin', 'super_admin'));
+
+-- 查角色必须走 security definer 函数。
+-- 如果在 profiles 的权限规则里直接 select profiles，会**无限递归**（Supabase 经典坑）。
+create or replace function public.my_role()
+returns text
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select coalesce((select role from public.profiles where id = auth.uid()), 'user');
+$$;
+
+-- 查任意一个人的角色（判断"能不能管他"时用）
+create or replace function public.role_of(p_user_id uuid)
+returns text
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select coalesce((select role from public.profiles where id = p_user_id), 'user');
+$$;
+
+-- 把角色换算成数字，方便比大小
+create or replace function public.role_level(p_role text)
+returns int
+language sql
+immutable
+as $$
+  select case p_role
+           when 'super_admin' then 3
+           when 'admin'       then 2
+           else 1
+         end;
+$$;
+
+-- 资料：自己可以改昵称，大管理者可以管所有人
+drop policy if exists "资料：只能改自己的" on public.profiles;
+drop policy if exists "资料：自己或大管理者可改" on public.profiles;
+create policy "资料：自己或大管理者可改" on public.profiles
+  for update to authenticated
+  using (auth.uid() = id or public.my_role() = 'super_admin')
+  with check (auth.uid() = id or public.my_role() = 'super_admin');
+
+-- ⚠️ 关键的堵漏：光有权限规则挡不住"改自己那一行的 role 字段"。
+--    权限规则是按行管的，管不到列。所以这里用**列级授权**：
+--    登录用户只能改 display_name 这一列，role 只能通过下面的函数改。
+revoke update on public.profiles from authenticated, anon;
+grant update (display_name) on public.profiles to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.2 问题状态：待回答 / 已解决，由**提问者自己**决定
+-- ---------------------------------------------------------------------------
+alter table public.questions add column if not exists status text not null default 'open';
+
+alter table public.questions drop constraint if exists questions_status_check;
+alter table public.questions add constraint questions_status_check
+  check (status in ('open', 'solved'));
+
+-- 老数据里已经选了最佳答案的，补成「已解决」
+update public.questions
+   set status = 'solved'
+ where accepted_answer_id is not null and status = 'open';
+
+-- 提问者自己改状态（走函数，不让前端直接 update）
+create or replace function public.set_question_status(p_question_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_author uuid;
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+  if p_status not in ('open', 'solved') then raise exception '状态只能是 open 或 solved'; end if;
+
+  select author_id into v_author from public.questions where id = p_question_id;
+  if v_author is null then raise exception '问题不存在'; end if;
+
+  -- 提问者本人，或者大管理者
+  if v_author <> auth.uid() and public.my_role() <> 'super_admin' then
+    raise exception '只有提问者本人能改这个状态';
+  end if;
+
+  update public.questions set status = p_status where id = p_question_id;
+end;
+$$;
+
+-- 问题：删掉"作者可以随便改自己那一行"的规则（否则能顺手把浏览量改成 99999）
+drop policy if exists "问题：只能改自己的" on public.questions;
+
+-- 问题：删除权限加上管理者分支
+drop policy if exists "问题：只能删自己的" on public.questions;
+drop policy if exists "问题：本人或管理者可删" on public.questions;
+create policy "问题：本人或管理者可删" on public.questions
+  for delete to authenticated
+  using (
+    auth.uid() = author_id
+    or public.my_role() = 'super_admin'
+    -- 管理者只能删"级别比自己低"的人的内容 —— 所以管理者之间互不管理
+    or (public.my_role() = 'admin' and public.role_level(public.role_of(author_id)) < 2)
+  );
+
+-- 回答：同样的规则
+drop policy if exists "回答：只能删自己的" on public.answers;
+drop policy if exists "回答：本人或管理者可删" on public.answers;
+create policy "回答：本人或管理者可删" on public.answers
+  for delete to authenticated
+  using (
+    auth.uid() = author_id
+    or public.my_role() = 'super_admin'
+    or (public.my_role() = 'admin' and public.role_level(public.role_of(author_id)) < 2)
+  );
+
+
+-- ---------------------------------------------------------------------------
+-- 13.3 浏览记录（私密，只保留最近 30 天，同一个问题只留最近一次）
+-- ---------------------------------------------------------------------------
+create table if not exists public.view_history (
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  question_id uuid not null references public.questions(id) on delete cascade,
+  viewed_at   timestamptz not null default now(),
+  primary key (user_id, question_id)   -- 一个人一个问题只留一条
+);
+
+create index if not exists view_history_user_idx
+  on public.view_history (user_id, viewed_at desc);
+
+alter table public.view_history enable row level security;
+
+drop policy if exists "浏览记录：只能看自己的" on public.view_history;
+create policy "浏览记录：只能看自己的" on public.view_history
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "浏览记录：只能写自己的" on public.view_history;
+create policy "浏览记录：只能写自己的" on public.view_history
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "浏览记录：只能改自己的" on public.view_history;
+create policy "浏览记录：只能改自己的" on public.view_history
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "浏览记录：只能删自己的" on public.view_history;
+create policy "浏览记录：只能删自己的" on public.view_history
+  for delete to authenticated using (auth.uid() = user_id);
+
+grant select, insert, update, delete on public.view_history to authenticated;
+
+-- 前端用的视图：把问题标题、标签一起带出来
+create or replace view public.view_history_view
+with (security_invoker = on) as
+select
+  h.user_id,
+  h.question_id,
+  h.viewed_at,
+  q.title,
+  q.tags,
+  q.status
+from public.view_history h
+join public.questions q on q.id = h.question_id;
+
+grant select on public.view_history_view to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.4 通知：加两种类型 + 一个说明字段
+--      'removed' = 问题被管理者删除
+--      'remind'  = 管理者提醒（比如提醒整理标签）
+-- ---------------------------------------------------------------------------
+alter table public.notifications add column if not exists note text;
+
+alter table public.notifications drop constraint if exists notifications_type_check;
+alter table public.notifications add constraint notifications_type_check
+  check (type in ('answer', 'accept', 'removed', 'remind'));
+
+-- 通知视图：补上 note、actor 的角色（前端要显示"管理员"徽章）
+-- ⚠️ note 必须**追加在最后面**：create or replace view 不允许在中途插列
+create or replace view public.notifications_view
+with (security_invoker = on) as
+select
+  n.id,
+  n.type,
+  n.is_read,
+  n.created_at,
+  n.question_id,
+  n.answer_id,
+  jsonb_build_object('id', a.id, 'name', a.display_name, 'role', a.role) as actor,
+  q.title as question_title,
+  n.note
+from public.notifications n
+left join public.profiles  a on a.id = n.actor_id
+left join public.questions q on q.id = n.question_id;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.5 视图补上作者角色 + 状态 + author_id
+--      注意：create or replace view **不允许**改列顺序或在中途插列，
+--      所以这里先 drop 再 create，建完要重新授权（grant 会跟着 drop 一起没）。
+-- ---------------------------------------------------------------------------
+drop view if exists public.questions_view;
+create view public.questions_view
+with (security_invoker = on) as
+select
+  q.id,
+  q.title,
+  q.body,
+  q.tags,
+  q.created_at,
+  q.views,
+  q.accepted_answer_id,
+  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
+  (select count(*) from public.answers a        where a.question_id = q.id)::int as answer_count,
+  (select count(*) from public.question_votes v where v.question_id = q.id)::int as votes,
+  q.status,
+  q.author_id
+from public.questions q
+join public.profiles p on p.id = q.author_id;
+
+grant select on public.questions_view to anon, authenticated;
+
+drop view if exists public.answers_view;
+create view public.answers_view
+with (security_invoker = on) as
+select
+  a.id,
+  a.question_id,
+  a.body,
+  a.created_at,
+  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
+  (select count(*) from public.answer_votes v where v.answer_id = a.id)::int as votes,
+  (select q.title from public.questions q where q.id = a.question_id) as question_title,
+  a.author_id
+from public.answers a
+join public.profiles p on p.id = a.author_id;
+
+grant select on public.answers_view to anon, authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.6 管理动作（全部走 security definer 函数，函数里检查权限）
+-- ---------------------------------------------------------------------------
+
+-- 谁能管谁：大管理者管所有人；管理者只能管"级别比自己低"的人
+create or replace function public.can_manage(p_target_user_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select case public.my_role()
+           when 'super_admin' then auth.uid() <> p_target_user_id
+           when 'admin'       then public.role_level(public.role_of(p_target_user_id)) < 2
+           else false
+         end;
+$$;
+
+-- 13.6.1 任命 / 撤销角色 —— **只有大管理者能调用**
+create or replace function public.set_user_role(p_user_id uuid, p_role text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+  if public.my_role() <> 'super_admin' then raise exception '只有大管理者能任命角色'; end if;
+  if p_role not in ('user', 'admin', 'super_admin') then raise exception '角色不合法'; end if;
+  if p_user_id = auth.uid() then raise exception '不能改自己的角色（怕把自己降级后没人管得了）'; end if;
+  if not exists (select 1 from public.profiles where id = p_user_id) then
+    raise exception '这个人不存在';
+  end if;
+
+  update public.profiles set role = p_role where id = p_user_id;
+end;
+$$;
+
+-- 13.6.2 管理者删除问题 —— 会先给作者发一条通知（带理由），再删
+--        注意：通知里的 question_id 故意留空，否则问题一删通知会被级联删掉
+create or replace function public.admin_delete_question(p_question_id uuid, p_reason text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_author uuid;
+  v_title  text;
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+
+  select author_id, title into v_author, v_title
+    from public.questions where id = p_question_id;
+
+  if v_author is null then raise exception '问题不存在'; end if;
+  if v_author = auth.uid() then raise exception '这是你自己的问题，请直接点「删除问题」'; end if;
+  if not public.can_manage(v_author) then raise exception '你没有权限删除这个人的问题'; end if;
+
+  insert into public.notifications (user_id, actor_id, type, question_id, note)
+  values (v_author, auth.uid(), 'removed', null,
+          coalesce(nullif(trim(p_reason), ''), '内容不符合规范') || '｜《' || v_title || '》');
+
+  delete from public.questions where id = p_question_id;
+end;
+$$;
+
+-- 13.6.3 管理者提醒（比如提醒整理标签）
+create or replace function public.send_reminder(p_user_id uuid, p_text text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+  if p_user_id = auth.uid() then raise exception '不用提醒自己'; end if;
+  if not public.can_manage(p_user_id) then raise exception '你没有权限提醒这个人'; end if;
+  if coalesce(trim(p_text), '') = '' then raise exception '提醒内容不能为空'; end if;
+
+  insert into public.notifications (user_id, actor_id, type, note)
+  values (p_user_id, auth.uid(), 'remind', left(p_text, 500));
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.7 浏览量 +1 顺便记浏览历史（未登录访客只加浏览量，不记历史）
+-- ---------------------------------------------------------------------------
+drop function if exists public.increment_views(uuid);
+create or replace function public.increment_views(p_question_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.questions set views = views + 1 where id = p_question_id;
+
+  if auth.uid() is not null then
+    insert into public.view_history (user_id, question_id, viewed_at)
+    values (auth.uid(), p_question_id, now())
+    on conflict (user_id, question_id) do update set viewed_at = now();
+  end if;
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.8 授权
+-- ---------------------------------------------------------------------------
+grant execute on function public.my_role()                              to anon, authenticated;
+grant execute on function public.role_of(uuid)                          to anon, authenticated;
+grant execute on function public.role_level(text)                       to anon, authenticated;
+grant execute on function public.can_manage(uuid)                       to authenticated;
+grant execute on function public.set_question_status(uuid, text)        to authenticated;
+grant execute on function public.set_user_role(uuid, text)              to authenticated;
+grant execute on function public.admin_delete_question(uuid, text)      to authenticated;
+grant execute on function public.send_reminder(uuid, text)              to authenticated;
+grant execute on function public.increment_views(uuid)                  to anon, authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 13.9 第一个大管理者（**只在第一次设置时跑一次**）
+--      把你自己那个账号设成大管理者。邮箱不对就改成你的。
+--      注意：改完之后你自己就不能再改自己的角色了（防止把最后一个大管理者降级）。
+-- ---------------------------------------------------------------------------
+update public.profiles
+   set role = 'super_admin'
+ where id = (select id from auth.users where email = '2518412558@qq.com')
+   and role <> 'super_admin';
+
+
+-- ---------------------------------------------------------------------------
+-- 13.10 自检：应该看到你自己的账号是 super_admin
+-- ---------------------------------------------------------------------------
+select display_name as 昵称, role as 角色
+  from public.profiles
+ order by public.role_level(role) desc, created_at;

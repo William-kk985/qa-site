@@ -22,6 +22,7 @@
 
     <div class="topbar-actions">
       <button class="btn btn-primary" data-action="ask">提问题</button>
+      <button class="btn btn-ghost hidden" id="me-btn" data-action="me" title="我的提问 / 回答 / 浏览记录">我的</button>
       <button class="btn btn-ghost bell-btn hidden" id="bell-btn" data-action="notices"
               title="通知" aria-label="通知">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
@@ -105,6 +106,8 @@
       <p class="form-error hidden" id="profile-error"></p>
       <div class="modal-actions modal-actions-split">
         <div>
+          <button type="button" class="btn btn-ghost btn-sm hidden" id="members-btn"
+                  data-action="members">成员管理</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="logout">退出登录</button>
         </div>
@@ -165,6 +168,21 @@
       <button type="button" class="linkbtn" data-action="read-all">全部标为已读</button>
     </div>
     <div class="notice-list" id="notice-list"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 成员管理（只有大管理者能打开） -->
+<div class="modal-mask hidden" id="members-mask">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h2 class="modal-title">成员管理</h2>
+      <span class="faint" id="members-count"></span>
+    </div>
+    <p class="modal-sub">大管理者可以任命或撤销角色。管理者之间互不管理，也不能管大管理者。</p>
+    <div class="member-list" id="member-list"></div>
     <div class="modal-actions">
       <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
     </div>

@@ -43,8 +43,33 @@ function userChip(user, ts, size = '') {
   return `<span class="user">
     <span class="avatar ${size}" style="background:${a.color}">${esc(a.initial)}</span>
     <span>${esc(name)}</span>
+    ${roleBadge(user)}
     ${ts ? `<span class="dot">·</span><span>${timeAgo(ts)}</span>` : ''}
   </span>`;
+}
+
+/* ------------------------------ 角色 ------------------------------
+   三级：普通用户 user < 管理者 admin < 大管理者 super_admin
+   ⚠️ 前端的判断只是"决定按钮显不显示"，真正的拦截在数据库的函数里。
+      改前端代码是绕不过权限的。
+   ------------------------------------------------------------------ */
+const ROLE_LABEL = { user: '普通用户', admin: '管理者', super_admin: '大管理者' };
+const ROLE_LEVEL = { user: 1, admin: 2, super_admin: 3 };
+
+const levelOf = u => ROLE_LEVEL[(u && u.role) || 'user'] || 1;
+const myLevel = () => ROLE_LEVEL[(me && me.role) || 'user'] || 1;
+
+const roleBadge = u => {
+  const r = (u && u.role) || 'user';
+  return r === 'user' ? '' : `<span class="role-badge role-${r}">${ROLE_LABEL[r]}</span>`;
+};
+
+/* 我能不能管这个人：大管理者管所有人；管理者只能管级别比自己低的（所以管理者之间互不管理） */
+function canManage(u) {
+  if (!me || !u || !u.id || u.id === me.id) return false;
+  if (myLevel() === 3) return true;
+  if (myLevel() === 2) return levelOf(u) < 2;
+  return false;
 }
 
 let toastTimer = null;
@@ -115,7 +140,10 @@ let myVotes = new Set();    // 'q:<id>' / 'a:<id>'
 let myBookmarks = new Set();// 我收藏的问题 id（只有自己看得到）
 let notices = [];           // 站内通知（只有自己看得到）
 let identities = [];        // 当前账号绑定了哪些登录方式
-const ui = { filter: 'new', tag: null, q: '' };
+let myAnswers = [];         // 我回答过的（「我的」页面）
+let myViews = [];           // 最近 30 天的浏览记录
+let members = [];           // 成员列表（大管理者面板）
+const ui = { filter: 'new', tag: null, q: '', meTab: 'questions' };
 let lastViewedId = null;
 let authMode = 'login';
 
@@ -147,16 +175,20 @@ const mapQuestion = r => ({
   votes: r.votes || 0,
   answerCount: r.answer_count || 0,
   acceptedAnswerId: r.accepted_answer_id,
-  author: r.author || { id: null, name: '匿名用户' },
+  status: r.status || 'open',
+  authorId: r.author_id,
+  author: r.author || { id: null, name: '匿名用户', role: 'user' },
 });
 
 const mapAnswer = r => ({
   id: r.id,
   questionId: r.question_id,
+  questionTitle: r.question_title || '',
   body: r.body,
   createdAt: Date.parse(r.created_at),
   votes: r.votes || 0,
-  author: r.author || { id: null, name: '匿名用户' },
+  authorId: r.author_id,
+  author: r.author || { id: null, name: '匿名用户', role: 'user' },
 });
 
 const api = {
@@ -233,6 +265,75 @@ const api = {
     }
   },
 
+  /* ---- 「我的」页面 ---- */
+  async listMyAnswers() {
+    const { data, error } = await sb.from('answers_view')
+      .select('*').eq('author_id', me.id).order('created_at', { ascending: false });
+    if (error) throw error;
+    myAnswers = data.map(mapAnswer);
+  },
+
+  async listMyViews() {
+    // 只取最近 30 天
+    const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    const { data, error } = await sb.from('view_history_view')
+      .select('*').eq('user_id', me.id).gte('viewed_at', since)
+      .order('viewed_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    myViews = data.map(r => ({
+      questionId: r.question_id,
+      title: r.title,
+      tags: r.tags || [],
+      status: r.status,
+      viewedAt: Date.parse(r.viewed_at),
+    }));
+  },
+
+  /* ---- 角色 / 管理动作（全部走数据库函数，函数里会再检查一次权限）---- */
+  async setQuestionStatus(questionId, status) {
+    const { error } = await sb.rpc('set_question_status',
+      { p_question_id: questionId, p_status: status });
+    if (error) throw error;
+  },
+
+  async adminDeleteQuestion(questionId, reason) {
+    const { error } = await sb.rpc('admin_delete_question',
+      { p_question_id: questionId, p_reason: reason });
+    if (error) throw error;
+  },
+
+  async sendReminder(userId, text) {
+    const { error } = await sb.rpc('send_reminder', { p_user_id: userId, p_text: text });
+    if (error) throw error;
+  },
+
+  async setUserRole(userId, role) {
+    const { error } = await sb.rpc('set_user_role', { p_user_id: userId, p_role: role });
+    if (error) throw error;
+  },
+
+  async listMembers() {
+    const { data, error } = await sb.from('profiles')
+      .select('id, display_name, role, created_at')
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    members = data;
+  },
+
+  /* 角色可能被大管理者改掉，登录状态下定期刷一下 */
+  async refreshMe() {
+    if (!me) return;
+    try {
+      const { data } = await sb.from('profiles')
+        .select('display_name, role').eq('id', me.id).maybeSingle();
+      if (!data) return;
+      let changed = false;
+      if (data.role && data.role !== me.role) { me.role = data.role; changed = true; }
+      if (data.display_name && data.display_name !== me.name) { me.name = data.display_name; changed = true; }
+      if (changed) renderUserBox();
+    } catch (_) { /* 忽略 */ }
+  },
+
   /* 通知：和收藏一样，表还没建好时不影响其它功能 */
   async loadNotices() {
     notices = [];
@@ -247,8 +348,9 @@ const api = {
         isRead: r.is_read,
         createdAt: Date.parse(r.created_at),
         questionId: r.question_id,
-        actor: r.actor || { id: null, name: '某人' },
+        actor: r.actor || { id: null, name: '某人', role: 'user' },
         questionTitle: r.question_title || '（问题已删除）',
+        note: r.note || '',
       }));
     } catch (e) {
       console.warn('读取通知失败：', e.message);
@@ -338,14 +440,16 @@ async function applySession(session) {
   const md = u.user_metadata || {};
   let name = md.display_name || md.user_name || md.preferred_username || md.full_name || md.name
     || (u.email || '').split('@')[0] || '匿名用户';
+  let role = 'user';
 
   try {
     const { data } = await sb.from('profiles')
-      .select('display_name').eq('id', u.id).maybeSingle();
+      .select('display_name, role').eq('id', u.id).maybeSingle();
     if (data && data.display_name) name = data.display_name;
+    if (data && data.role) role = data.role;
   } catch (_) { /* profiles 还没建好时用兜底昵称 */ }
 
-  me = { id: u.id, name, email: u.email || '' };
+  me = { id: u.id, name, email: u.email || '', role };
   await Promise.all([api.loadMyVotes(), api.loadMyBookmarks(), api.loadNotices()]);
 }
 
@@ -354,13 +458,18 @@ function renderUserBox() {
   if (me) {
     const a = avatarOf(me.name);
     box.innerHTML = `
-      <button class="user user-btn" data-action="profile" title="修改昵称 / 退出登录">
+      <button class="user user-btn" data-action="profile" title="我的账号">
         <span class="avatar" style="background:${a.color}">${esc(a.initial)}</span>
         <span class="hide-sm">${esc(me.name)}</span>
+        ${roleBadge(me)}
       </button>`;
   } else {
     box.innerHTML = `<button class="btn btn-soft" data-action="login">登录 / 注册</button>`;
   }
+
+  const meBtn = $('#me-btn');
+  if (meBtn) meBtn.classList.toggle('hidden', !me);
+
   renderBell();   // 铃铛跟着登录状态一起更新
 }
 
@@ -484,6 +593,10 @@ async function openProfile() {
   $('#identity-hint').classList.remove('is-error');
   $('#identity-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#profile-mask').classList.remove('hidden');
+
+  // 「成员管理」只有大管理者看得到
+  const mb = $('#members-btn');
+  if (mb) mb.classList.toggle('hidden', myLevel() !== 3);
   setTimeout(() => $('#profile-form [name=display_name]').focus(), 30);
 
   await api.loadIdentities();
@@ -552,9 +665,18 @@ function renderNotices() {
   }
 
   list.innerHTML = notices.map(n => {
-    const text = n.type === 'answer'
-      ? `<b>${esc(n.actor.name)}</b> 回答了你的问题 <span class="notice-q">《${esc(n.questionTitle)}》</span>`
-      : `<b>${esc(n.actor.name)}</b> 把你的回答选为了最佳答案 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
+    let text;
+    if (n.type === 'answer') {
+      text = `<b>${esc(n.actor.name)}</b> 回答了你的问题 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
+    } else if (n.type === 'accept') {
+      text = `<b>${esc(n.actor.name)}</b> 把你的回答选为了最佳答案 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
+    } else if (n.type === 'removed') {
+      text = `<b>${esc(n.actor.name)}</b> 删除了你的一个问题 <span class="notice-q">${esc(n.note || '')}</span>`;
+    } else if (n.type === 'remind') {
+      text = `<b>${esc(n.actor.name)}</b> 提醒你：<span class="notice-q">${esc(n.note || '')}</span>`;
+    } else {
+      text = `<b>${esc(n.actor.name)}</b> ${esc(n.note || '给你发了一条通知')}`;
+    }
 
     return `<button class="notice ${n.isRead ? '' : 'is-unread'}"
               data-action="notice-open" data-id="${n.id}" data-q="${n.questionId || ''}">
@@ -577,6 +699,45 @@ async function openNotices() {
 
 function closeNotices() { $('#notice-mask').classList.add('hidden'); }
 
+/* ------------------------------ 成员管理（只有大管理者） ------------------------------ */
+async function openMembers() {
+  if (myLevel() !== 3) { toast('只有大管理者能打开成员管理'); return; }
+
+  closeProfile();
+  $('#members-count').textContent = '';
+  $('#member-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
+  $('#members-mask').classList.remove('hidden');
+
+  try {
+    await api.listMembers();
+    renderMembers();
+  } catch (err) {
+    const ex = explain(err);
+    $('#member-list').innerHTML = `<p class="form-error">${esc(ex.title)}：${esc(ex.detail)}</p>`;
+  }
+}
+
+function closeMembers() { $('#members-mask').classList.add('hidden'); }
+
+function renderMembers() {
+  $('#members-count').textContent = members.length + ' 人';
+
+  $('#member-list').innerHTML = members.map(m => {
+    const isSelf = me && m.id === me.id;
+    const btns = ['user', 'admin', 'super_admin'].map(r => `
+      <button class="btn btn-ghost btn-sm ${m.role === r ? 'is-current' : ''}"
+              data-action="set-role" data-u="${m.id}" data-role="${r}"
+              data-name="${esc(m.display_name)}" ${isSelf ? 'disabled' : ''}>
+        ${ROLE_LABEL[r]}
+      </button>`).join('');
+
+    return `<div class="member-row">
+      <span class="member-name">${esc(m.display_name)}${isSelf ? ' <span class="faint">（我）</span>' : ''}</span>
+      <span class="member-actions">${btns}</span>
+    </div>`;
+  }).join('');
+}
+
 /* ------------------------------ 页面：列表 ------------------------------ */
 const heat = q => q.votes * 3 + q.answerCount * 5 + q.views / 100;
 
@@ -595,8 +756,8 @@ function visibleQuestions() {
     list = list.filter(q =>
       (q.title + ' ' + q.body + ' ' + q.tags.join(' ')).toLowerCase().includes(needle));
   }
-  if (ui.filter === 'unanswered') list = list.filter(q => q.answerCount === 0);
-  if (ui.filter === 'solved') list = list.filter(q => q.acceptedAnswerId);
+  if (ui.filter === 'unanswered') list = list.filter(q => q.status !== 'solved');
+  if (ui.filter === 'solved') list = list.filter(q => q.status === 'solved');
   if (ui.filter === 'saved') list = list.filter(q => myBookmarks.has(q.id));
 
   if (ui.filter === 'hot') list.sort((a, b) => heat(b) - heat(a));
@@ -608,7 +769,7 @@ function visibleQuestions() {
 
 function renderList() {
   const answers = questions.reduce((n, q) => n + q.answerCount, 0);
-  const solved = questions.filter(q => q.acceptedAnswerId).length;
+  const solved = questions.filter(q => q.status === 'solved').length;
   const people = new Set(questions.map(q => q.author.id).filter(Boolean));
 
   const tabs = [['new', '最新'], ['hot', '热门'], ['unanswered', '待回答'], ['solved', '已解决']];
@@ -635,7 +796,7 @@ function renderList() {
       <div class="qcard-main">
         <h3>
           <a href="#/q/${q.id}">${esc(q.title)}</a>
-          ${q.acceptedAnswerId ? '<span class="pill pill-green">已解决</span>' : ''}
+          ${q.status === 'solved' ? '<span class="pill pill-green">已解决</span>' : ''}
         </h3>
         <p>${esc(excerpt(q.body, 120))}</p>
         <div class="qcard-meta">
@@ -678,6 +839,90 @@ function renderList() {
 
   const si = $('#search-input');
   if (document.activeElement !== si) si.value = ui.q;
+}
+
+/* ------------------------------ 页面：我的 ------------------------------ */
+const ME_TABS = [['questions', '我的提问'], ['answers', '我的回答'], ['views', '浏览记录']];
+
+async function renderMy() {
+  if (!me) {
+    $('#app').innerHTML = `
+      <a class="back" href="#/">← 回到问题列表</a>
+      <div class="gate">
+        <p>登录后才能看到你自己的记录。</p>
+        <button class="btn btn-primary" data-action="login">登录 / 注册</button>
+      </div>`;
+    return;
+  }
+
+  if (ui.meTab === 'questions') await api.list();
+  else if (ui.meTab === 'answers') await api.listMyAnswers();
+  else await api.listMyViews();
+
+  const tabs = ME_TABS.map(([k, label]) =>
+    `<button class="tab ${ui.meTab === k ? 'is-active' : ''}" data-action="me-tab" data-tab="${k}">${label}</button>`
+  ).join('');
+
+  const emptyBox = (a, b) => `
+    <div class="empty">
+      <div class="big">🗂️</div>
+      <p>${a}</p>
+      ${b ? `<p class="faint" style="margin-top:6px">${b}</p>` : ''}
+    </div>`;
+
+  let body = '';
+
+  if (ui.meTab === 'questions') {
+    const mine = questions.filter(q => q.authorId === me.id);
+    body = mine.length ? mine.map(q => `
+      <a class="rowcard" href="#/q/${q.id}">
+        <h4>${esc(q.title)}
+          ${q.status === 'solved'
+            ? '<span class="pill pill-green">已解决</span>'
+            : '<span class="pill pill-amber">待回答</span>'}</h4>
+        <p class="snippet">${esc(excerpt(q.body, 110))}</p>
+        <div class="meta">
+          <span>${q.answerCount} 个回答</span><span>·</span>
+          <span>${q.votes} 有用</span><span>·</span>
+          <span>${q.views} 次浏览</span><span>·</span>
+          <span>${timeAgo(q.createdAt)}</span>
+          ${q.tags.map(t => `<span class="tag" style="cursor:default">${esc(t)}</span>`).join('')}
+        </div>
+      </a>`).join('')
+      : emptyBox('你还没提过问题。', '点右上角「提问题」发第一个。');
+
+  } else if (ui.meTab === 'answers') {
+    body = myAnswers.length ? myAnswers.map(a => `
+      <a class="rowcard" href="#/q/${a.questionId}">
+        <h4>${esc(a.questionTitle || '（问题已删除）')}</h4>
+        <p class="snippet">${esc(a.body)}</p>
+        <div class="meta">
+          <span>${a.votes} 有用</span><span>·</span>
+          <span>回答于 ${timeAgo(a.createdAt)}</span>
+        </div>
+      </a>`).join('')
+      : emptyBox('你还没回答过问题。', '去问题列表挑一个回答试试。');
+
+  } else {
+    body = myViews.length ? myViews.map(v => `
+      <a class="rowcard" href="#/q/${v.questionId}">
+        <h4>${esc(v.title)}
+          ${v.status === 'solved' ? '<span class="pill pill-green">已解决</span>' : ''}</h4>
+        <div class="meta">
+          <span>${timeAgo(v.viewedAt)}看过</span>
+          ${v.tags.map(t => `<span class="tag" style="cursor:default">${esc(t)}</span>`).join('')}
+        </div>
+      </a>`).join('')
+      : emptyBox('最近 30 天没有浏览记录。', '点开一个问题就会记在这里，只有你自己看得到。');
+  }
+
+  $('#app').innerHTML = `
+    <a class="back" href="#/">← 回到问题列表</a>
+    <div class="toolbar">
+      <div class="tabs">${tabs}</div>
+      <span class="faint">${ui.meTab === 'views' ? '只保留最近 30 天 · 只有你自己看得到' : ''}</span>
+    </div>
+    <div>${body}</div>`;
 }
 
 /* ------------------------------ 页面：详情 ------------------------------ */
@@ -748,6 +993,9 @@ function renderDetail(q) {
         <div style="min-width:0">
           <h1>${esc(q.title)}</h1>
           <div class="tags" style="margin-top:10px">
+            ${q.status === 'solved'
+              ? '<span class="pill pill-green">已解决</span>'
+              : '<span class="pill pill-amber">待回答</span>'}
             ${q.tags.map(t => `<button class="tag" data-action="tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}
           </div>
         </div>
@@ -762,7 +1010,19 @@ function renderDetail(q) {
           <button class="vote-btn ${hasVoted('q', q.id) ? 'is-on' : ''}"
                   data-action="vote-q" data-q="${q.id}">▲ 有用 ${q.votes}</button>
           ${bookmarkBtn(q.id)}
-          ${isMine(q.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-q" data-q="${q.id}">删除问题</button>` : ''}
+
+          ${isMine(q.author) ? `
+            <button class="btn btn-soft btn-sm" data-action="toggle-status" data-q="${q.id}"
+                    data-status="${q.status === 'solved' ? 'open' : 'solved'}">
+              ${q.status === 'solved' ? '改回待回答' : '标记为已解决'}
+            </button>
+            <button class="btn btn-ghost btn-sm" data-action="del-q" data-q="${q.id}">删除问题</button>` : ''}
+
+          ${canManage(q.author) ? `
+            <button class="btn btn-ghost btn-sm" data-action="remind"
+                    data-u="${q.author.id}" data-name="${esc(q.author.name)}">提醒整理标签</button>
+            <button class="btn btn-ghost btn-sm" data-action="admin-del-q" data-q="${q.id}"
+                    data-name="${esc(q.author.name)}">删除（附理由）</button>` : ''}
         </div>
       </div>
     </article>
@@ -851,6 +1111,8 @@ async function route() {
         api.bumpViews(id).catch(() => {});   // 浏览量失败不影响页面
       }
       renderDetail(await api.get(id));
+    } else if (hash === '#/me') {
+      await renderMy();
     } else if (hash === '#/ask') {
       renderAsk();
     } else {
@@ -907,8 +1169,61 @@ document.addEventListener('click', async e => {
         break;
 
       case 'close-modal':
-        closeAuth(); closeProfile(); closeReset(); closeNotices();
+        closeAuth(); closeProfile(); closeReset(); closeNotices(); closeMembers();
         break;
+
+      case 'me':
+        if ((location.hash || '#/') === '#/me') await renderMy();
+        else location.hash = '#/me';
+        break;
+
+      case 'me-tab':
+        ui.meTab = el.dataset.tab;
+        await renderMy();
+        break;
+
+      case 'toggle-status':
+        await api.setQuestionStatus(el.dataset.q, el.dataset.status);
+        await api.list();
+        await route();
+        toast(el.dataset.status === 'solved' ? '已标记为已解决' : '已改回待回答');
+        break;
+
+      case 'admin-del-q': {
+        const reason = prompt(
+          `删除「${el.dataset.name}」的这个问题？\n\n请填删除理由，会发通知告诉他：`,
+          '标签不规范 / 内容不符合规范');
+        if (reason === null) return;
+        await api.adminDeleteQuestion(el.dataset.q, reason);
+        location.hash = '#/';
+        await route();
+        toast('已删除，并已通知作者');
+        break;
+      }
+
+      case 'remind': {
+        const text = prompt(
+          `提醒「${el.dataset.name}」：`,
+          '你的问题标签不太准确，麻烦整理一下标签，方便别人搜到 🙂');
+        if (text === null || !text.trim()) return;
+        await api.sendReminder(el.dataset.u, text.trim());
+        toast('提醒已发出');
+        break;
+      }
+
+      case 'members':
+        await openMembers();
+        break;
+
+      case 'set-role': {
+        const role = el.dataset.role;
+        if (!confirm(`把「${el.dataset.name}」设为「${ROLE_LABEL[role]}」？`)) return;
+        await api.setUserRole(el.dataset.u, role);
+        await api.listMembers();
+        renderMembers();
+        toast('已更新：' + el.dataset.name + ' → ' + ROLE_LABEL[role]);
+        break;
+      }
 
       case 'notices':
         await openNotices();
@@ -1074,6 +1389,10 @@ $('#reset-mask').addEventListener('click', e => {
 
 $('#notice-mask').addEventListener('click', e => {
   if (e.target.id === 'notice-mask') closeNotices();
+});
+
+$('#members-mask').addEventListener('click', e => {
+  if (e.target.id === 'members-mask') closeMembers();
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
@@ -1342,9 +1661,10 @@ window.addEventListener('hashchange', route);
     }
   }
 
-  // 每分钟悄悄刷一次通知，这样别人回答了你的问题，页面上就能看到红点
+  // 每分钟悄悄刷一次：通知 + 自己的角色（可能被大管理者改了）
   setInterval(async () => {
     if (!me) return;
+    await api.refreshMe();
     await api.loadNotices();
     renderBell();
     if (!$('#notice-mask').classList.contains('hidden')) renderNotices();
