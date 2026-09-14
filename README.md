@@ -487,9 +487,9 @@ Supabase 的规则（见 [官方文档](https://supabase.com/docs/guides/auth/au
    |---|---|
    | Host | `smtp.qq.com` |
    | Port | `465` |
-   | Username | `2518412558@qq.com` |
+   | Username | `你的邮箱@qq.com`（完整的 QQ 邮箱地址） |
    | Password | 上一步拿到的**授权码** |
-   | Sender email | `2518412558@qq.com`（必须和 Username 一致） |
+   | Sender email | 和 Username 完全一致 |
    | Sender name | `问答站` |
 
 3. Save。之后找回密码的邮件就是从你自己的 QQ 邮箱发出去的，送达率基本没问题。
@@ -501,7 +501,7 @@ Supabase 的规则（见 [官方文档](https://supabase.com/docs/guides/auth/au
 ```sql
 update auth.users
    set encrypted_password = extensions.crypt('你的新密码', extensions.gen_salt('bf'))
- where email = '2518412558@qq.com';
+ where email = '要重置的那个邮箱';
 ```
 
 （提示 `extensions.crypt` 不存在的话，把 `extensions.` 去掉再跑一次。）

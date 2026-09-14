@@ -944,12 +944,16 @@ grant execute on function public.increment_views(uuid)                  to anon,
 
 -- ---------------------------------------------------------------------------
 -- 13.9 第一个大管理者（**只在第一次设置时跑一次**）
---      把你自己那个账号设成大管理者。邮箱不对就改成你的。
---      注意：改完之后你自己就不能再改自己的角色了（防止把最后一个大管理者降级）。
+--      ⚠️ 把下面的 you@example.com 换成**你自己的注册邮箱**再跑。
+--      保持默认值也没关系：它匹配不到任何人，只是不会有超级管理员而已。
+--
+--      （这里故意不写真实邮箱 —— 这个文件会随公开仓库一起被所有人看到，
+--        没必把自己的邮箱晒出去。）
+--      注意：设完之后你自己就不能再改自己的角色了（防止把最后一个大管理者降级）。
 -- ---------------------------------------------------------------------------
 update public.profiles
    set role = 'super_admin'
- where id = (select id from auth.users where email = '2518412558@qq.com')
+ where id = (select id from auth.users where email = 'you@example.com')
    and role <> 'super_admin';
 
 
