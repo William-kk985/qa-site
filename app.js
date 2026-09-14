@@ -104,6 +104,7 @@ let me = null;              // { id, name, email } | null
 let questions = [];         // 问题列表（来自 questions_view）
 let myVotes = new Set();    // 'q:<id>' / 'a:<id>'
 let myBookmarks = new Set();// 我收藏的问题 id（只有自己看得到）
+let notices = [];           // 站内通知（只有自己看得到）
 const ui = { filter: 'new', tag: null, q: '' };
 let lastViewedId = null;
 let authMode = 'login';
@@ -210,6 +211,39 @@ const api = {
     }
   },
 
+  /* 通知：和收藏一样，表还没建好时不影响其它功能 */
+  async loadNotices() {
+    notices = [];
+    if (!me) return;
+    try {
+      const { data, error } = await sb.from('notifications_view')
+        .select('*').order('created_at', { ascending: false }).limit(30);
+      if (error) throw error;
+      notices = (data || []).map(r => ({
+        id: r.id,
+        type: r.type,
+        isRead: r.is_read,
+        createdAt: Date.parse(r.created_at),
+        questionId: r.question_id,
+        actor: r.actor || { id: null, name: '某人' },
+        questionTitle: r.question_title || '（问题已删除）',
+      }));
+    } catch (e) {
+      console.warn('读取通知失败：', e.message);
+    }
+  },
+
+  async markNoticeRead(id) {
+    const { error } = await sb.from('notifications').update({ is_read: true }).eq('id', id);
+    if (error) throw error;
+  },
+
+  async markAllNoticesRead() {
+    const { error } = await sb.from('notifications')
+      .update({ is_read: true }).eq('user_id', me.id).eq('is_read', false);
+    if (error) throw error;
+  },
+
   async createQuestion({ title, body, tags }) {
     const { data, error } = await sb.from('questions')
       .insert({ title, body, tags, author_id: me.id })
@@ -290,7 +324,7 @@ async function applySession(session) {
   } catch (_) { /* profiles 还没建好时用兜底昵称 */ }
 
   me = { id: u.id, name, email: u.email || '' };
-  await Promise.all([api.loadMyVotes(), api.loadMyBookmarks()]);
+  await Promise.all([api.loadMyVotes(), api.loadMyBookmarks(), api.loadNotices()]);
 }
 
 function renderUserBox() {
@@ -305,6 +339,7 @@ function renderUserBox() {
   } else {
     box.innerHTML = `<button class="btn btn-soft" data-action="login">登录 / 注册</button>`;
   }
+  renderBell();   // 铃铛跟着登录状态一起更新
 }
 
 /* ------------------------------ 登录弹窗 ------------------------------ */
@@ -376,6 +411,60 @@ function openReset(mode = 'request') {
 }
 
 function closeReset() { $('#reset-mask').classList.add('hidden'); }
+
+/* ------------------------------ 站内通知 ------------------------------ */
+function renderBell() {
+  const btn = $('#bell-btn');
+  if (!btn) return;
+
+  btn.classList.toggle('hidden', !me);
+
+  const unread = notices.filter(n => !n.isRead).length;
+  const badge = $('#bell-badge');
+  badge.textContent = unread > 99 ? '99+' : String(unread);
+  badge.classList.toggle('hidden', unread === 0 || !me);
+}
+
+function renderNotices() {
+  const list = $('#notice-list');
+
+  if (!notices.length) {
+    list.innerHTML = `
+      <div class="empty" style="padding:32px 16px">
+        <div class="big">🔔</div>
+        <p>还没有通知。</p>
+        <p class="faint" style="margin-top:6px">
+          有人回答你的问题、或你的回答被选为最佳答案时，会出现在这里。
+        </p>
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = notices.map(n => {
+    const text = n.type === 'answer'
+      ? `<b>${esc(n.actor.name)}</b> 回答了你的问题 <span class="notice-q">《${esc(n.questionTitle)}》</span>`
+      : `<b>${esc(n.actor.name)}</b> 把你的回答选为了最佳答案 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
+
+    return `<button class="notice ${n.isRead ? '' : 'is-unread'}"
+              data-action="notice-open" data-id="${n.id}" data-q="${n.questionId || ''}">
+      <span class="dot2" ${n.isRead ? 'style="visibility:hidden"' : ''}></span>
+      <span class="notice-body">
+        <span class="notice-title">${text}</span>
+        <span class="notice-time">${timeAgo(n.createdAt)}</span>
+      </span>
+    </button>`;
+  }).join('');
+}
+
+async function openNotices() {
+  if (!me) { openAuth('login'); return; }
+  await api.loadNotices();
+  renderNotices();
+  renderBell();
+  $('#notice-mask').classList.remove('hidden');
+}
+
+function closeNotices() { $('#notice-mask').classList.add('hidden'); }
 
 /* ------------------------------ 页面：列表 ------------------------------ */
 const heat = q => q.votes * 3 + q.answerCount * 5 + q.views / 100;
@@ -707,7 +796,34 @@ document.addEventListener('click', async e => {
         break;
 
       case 'close-modal':
-        closeAuth(); closeProfile(); closeReset();
+        closeAuth(); closeProfile(); closeReset(); closeNotices();
+        break;
+
+      case 'notices':
+        await openNotices();
+        break;
+
+      case 'notice-open': {
+        const n = notices.find(x => x.id === el.dataset.id);
+        if (n && !n.isRead) {
+          await api.markNoticeRead(n.id);
+          n.isRead = true;
+          renderBell();
+          renderNotices();
+        }
+        if (el.dataset.q) {
+          closeNotices();
+          location.hash = '#/q/' + el.dataset.q;
+        }
+        break;
+      }
+
+      case 'read-all':
+        await api.markAllNoticesRead();
+        notices.forEach(n => { n.isRead = true; });
+        renderBell();
+        renderNotices();
+        toast('已全部标为已读');
         break;
 
       case 'forgot':
@@ -726,10 +842,10 @@ document.addEventListener('click', async e => {
 
       case 'logout':
         await sb.auth.signOut();
-        me = null; myVotes = new Set(); myBookmarks = new Set();
+        me = null; myVotes = new Set(); myBookmarks = new Set(); notices = [];
         lastViewedId = null;
         if (ui.filter === 'saved') ui.filter = 'new';
-        closeProfile();
+        closeProfile(); closeNotices();
         renderUserBox();
         await route();
         toast('已退出登录');
@@ -831,6 +947,10 @@ $('#profile-mask').addEventListener('click', e => {
 
 $('#reset-mask').addEventListener('click', e => {
   if (e.target.id === 'reset-mask') closeReset();
+});
+
+$('#notice-mask').addEventListener('click', e => {
+  if (e.target.id === 'notice-mask') closeNotices();
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
@@ -1089,4 +1209,12 @@ window.addEventListener('hashchange', route);
     history.replaceState(null, '', location.pathname + location.search);
     toast('GitHub 登录失败：' + oauthError);
   }
+
+  // 每分钟悄悄刷一次通知，这样别人回答了你的问题，页面上就能看到红点
+  setInterval(async () => {
+    if (!me) return;
+    await api.loadNotices();
+    renderBell();
+    if (!$('#notice-mask').classList.contains('hidden')) renderNotices();
+  }, 60000);
 })();

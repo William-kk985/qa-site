@@ -386,7 +386,129 @@ grant execute on function public.increment_views(uuid)       to anon, authentica
 
 
 -- ============================================================================
--- 10. 补历史用户
+-- 10. 站内通知 notifications
+--     谁通知谁：有人回答了你的问题 → 通知提问者；你的回答被选为最佳 → 通知回答者。
+--
+--     ⚠️ 重要：通知**只能由下面的触发器生成**，任何人（包括登录用户）都不允许
+--     直接往这张表里插数据 —— 否则坏分子可以伪造一条"某某回答了你的问题"，
+--     点进去就是钓鱼链接。所以第 10.4 节里故意**没有** grant insert。
+-- ============================================================================
+
+-- 10.1 表
+create table if not exists public.notifications (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles(id) on delete cascade,   -- 收件人
+  actor_id    uuid references public.profiles(id) on delete set null,           -- 触发这件事的人
+  type        text not null check (type in ('answer', 'accept')),
+  question_id uuid references public.questions(id) on delete cascade,
+  answer_id   uuid references public.answers(id) on delete cascade,
+  is_read     boolean not null default false,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists notifications_user_idx
+  on public.notifications (user_id, is_read, created_at desc);
+
+-- 10.2 权限：只能看 / 改 / 删自己的通知
+alter table public.notifications enable row level security;
+
+drop policy if exists "通知：只能看自己的" on public.notifications;
+create policy "通知：只能看自己的" on public.notifications
+  for select to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists "通知：只能标自己的为已读" on public.notifications;
+create policy "通知：只能标自己的为已读" on public.notifications
+  for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "通知：只能删自己的" on public.notifications;
+create policy "通知：只能删自己的" on public.notifications
+  for delete to authenticated
+  using (auth.uid() = user_id);
+
+-- 10.3 触发器：通知由数据库自动生成，不经过前端
+--      （security definer 让它能以管理员身份写入受保护的通知表）
+create or replace function public.notify_on_answer()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_asker uuid;
+begin
+  select author_id into v_asker from public.questions where id = new.question_id;
+  -- 自己回答自己的问题不用通知
+  if v_asker is not null and v_asker <> new.author_id then
+    insert into public.notifications (user_id, actor_id, type, question_id, answer_id)
+    values (v_asker, new.author_id, 'answer', new.question_id, new.id);
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_answer_created on public.answers;
+create trigger on_answer_created
+  after insert on public.answers
+  for each row execute function public.notify_on_answer();
+
+create or replace function public.notify_on_accept()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_answerer uuid;
+begin
+  -- 只在「最佳答案」真的发生变化时通知
+  --（注意：浏览量 +1 也会触发这个函数，所以这个判断不能省）
+  if new.accepted_answer_id is not null
+     and new.accepted_answer_id is distinct from old.accepted_answer_id then
+
+    select author_id into v_answerer from public.answers where id = new.accepted_answer_id;
+
+    if v_answerer is not null and v_answerer <> new.author_id then
+      insert into public.notifications (user_id, actor_id, type, question_id, answer_id)
+      values (v_answerer, new.author_id, 'accept', new.id, new.accepted_answer_id);
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_answer_accepted on public.questions;
+create trigger on_answer_accepted
+  after update on public.questions
+  for each row execute function public.notify_on_accept();
+
+-- 10.4 授权
+grant select, update, delete on public.notifications to authenticated;
+-- ↑ 故意没有 insert：通知只能由触发器写入
+
+-- 10.5 前端用的视图：把「谁」「哪个问题」一次查好
+create or replace view public.notifications_view
+with (security_invoker = on) as
+select
+  n.id,
+  n.type,
+  n.is_read,
+  n.created_at,
+  n.question_id,
+  n.answer_id,
+  jsonb_build_object('id', a.id, 'name', a.display_name) as actor,
+  q.title as question_title
+from public.notifications n
+left join public.profiles  a on a.id = n.actor_id
+left join public.questions q on q.id = n.question_id;
+
+grant select on public.notifications_view to authenticated;
+
+
+-- ============================================================================
+-- 11. 补历史用户
 --    如果有人在触发器建好之前就注册了，这里给他们补上 profiles 行。
 -- ============================================================================
 insert into public.profiles (id, display_name)
@@ -398,10 +520,11 @@ on conflict (id) do nothing;
 
 
 -- ============================================================================
--- 11. 自检：应该返回 5 行，数字都是 0（或者你已有的数据量）
+-- 12. 自检：应该返回 6 行，数字都是 0（或者你已有的数据量）
 -- ============================================================================
-select '资料 profiles'  as 表, count(*) as 行数 from public.profiles
-union all select '问题 questions', count(*) from public.questions
-union all select '回答 answers',   count(*) from public.answers
-union all select '点赞 votes',     count(*) from public.question_votes
-union all select '收藏 bookmarks', count(*) from public.bookmarks;
+select '资料 profiles'   as 表, count(*) as 行数 from public.profiles
+union all select '问题 questions',  count(*) from public.questions
+union all select '回答 answers',    count(*) from public.answers
+union all select '点赞 votes',      count(*) from public.question_votes
+union all select '收藏 bookmarks',  count(*) from public.bookmarks
+union all select '通知 notifications', count(*) from public.notifications;
