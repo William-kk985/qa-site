@@ -36,9 +36,12 @@
 :root[data-density="loose"]   { --card-pad: 20px 24px; --list-gap: 16px; }
 
 /* 深色变量写两遍：一遍给"跟随系统"，一遍给用户手动强制深色。
-   :root:not([data-theme="light"]) 是让"系统深色 + 用户选浅色"时浅色赢。 */
+   · :where() 里的东西**不计入选择器权重** —— 所以这两条规则的权重都还是 (0,1,0)，
+     跟普通 :root 一样。这样"自定义外观"那个**后插入**的 <style> 才能靠"后来居上"
+     把颜色覆盖掉（否则 :root[data-theme=dark] 权重更高，取色器会失效）。
+   · :where(:not([data-theme="light"])) 是让"系统深色 + 用户选浅色"时浅色赢。 */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:where(:not([data-theme="light"])) {
     --bg: #14161a;
     --surface: #1c1f24;
     --surface-2: #23272e;
@@ -64,7 +67,7 @@
   }
 }
 
-:root[data-theme="dark"] {
+:root:where([data-theme="dark"]) {
     --bg: #14161a;
     --surface: #1c1f24;
     --surface-2: #23272e;
@@ -269,7 +272,7 @@ h1, h2, h3, p { margin: 0; }
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .tabs { display: flex; gap: 4px; background: var(--surface-2); padding: 3px; border-radius: 10px; }
@@ -286,7 +289,21 @@ h1, h2, h3, p { margin: 0; }
 .tab:hover { color: var(--text); }
 .tab.is-active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 
+/* 标签筛选栏：独立一行（不要和页签挤在一起，会显得不整齐） */
 .tagbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* 只有"列表页那一行"才需要下边距（提问页的常用标签是嵌在表单里的） */
+.app > .tagbar { margin-bottom: 16px; }
+
+.tagbar-label {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+/* 筛选栏里的标签芯片跟页签高度对齐（卡片里的小标签不受影响） */
+.tagbar .tag { padding: 5px 11px; }
 
 /* ====================== 问题卡片 ====================== */
 .qlist { display: flex; flex-direction: column; gap: var(--list-gap); }

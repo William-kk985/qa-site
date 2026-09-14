@@ -215,36 +215,51 @@ function loadTheme() {
 function applyTheme() {
   const r = document.documentElement;
 
-  // 主题色（inline style 优先级最高，所以能盖过浅色/深色两套默认值）
-  if (theme.primary) {
-    r.style.setProperty('--primary', theme.primary);
-    r.style.setProperty('--primary-soft', `color-mix(in srgb, ${theme.primary} 14%, transparent)`);
-  } else {
-    r.style.removeProperty('--primary');
-    r.style.removeProperty('--primary-soft');
+  /* ---- 1) 外观参数写进一个专门的 <style>，**不用 inline style** ----
+     为什么：inline style 的优先级高于任何样式表，会把你自定义 CSS 里的
+     `:root { --primary: ... }` 盖掉 —— 很反直觉。
+     改成 <style> 之后，优先级链条就是：
+        站点默认  <  外观参数（这个 style）  <  你的自定义 CSS（后面那个 style）  <  你的自定义 JS
+     ------------------------------------------------------------------ */
+  let vars = document.getElementById('qa-theme-vars');
+  if (!vars) {
+    vars = document.createElement('style');
+    vars.id = 'qa-theme-vars';
+    document.head.appendChild(vars);
   }
 
-  // 明暗：system 时去掉属性，交给 CSS 的媒体查询
+  const decl = [];
+  if (theme.primary) {
+    decl.push(`--primary: ${theme.primary};`);
+    decl.push(`--primary-soft: color-mix(in srgb, ${theme.primary} 14%, transparent);`);
+  }
+  decl.push(`--base-font: ${theme.font}px;`);
+  decl.push(`--radius: ${theme.radius}px;`);
+  decl.push(`--maxw: ${theme.width}px;`);
+  vars.textContent = ':root { ' + decl.join(' ') + ' }';
+
+  /* ---- 2) 明暗 / 密度用属性，不参与 CSS 优先级竞争 ---- */
   if (theme.scheme === 'system') r.removeAttribute('data-theme');
   else r.setAttribute('data-theme', theme.scheme);
-
-  r.style.setProperty('--base-font', theme.font + 'px');
-  r.style.setProperty('--radius', theme.radius + 'px');
-  r.style.setProperty('--maxw', theme.width + 'px');
   r.setAttribute('data-density', theme.density);
 
-  // 自定义 CSS：注入一个 <style>（只当文本用，不做 HTML 解析）
-  let el = document.getElementById('qa-custom-css');
+  /* ---- 3) 自定义 CSS：注入另一个 <style>，必须排在 vars 后面 ---- */
+  let cust = document.getElementById('qa-custom-css');
   if (theme.css && theme.css.trim()) {
-    if (!el) {
-      el = document.createElement('style');
-      el.id = 'qa-custom-css';
-      document.head.appendChild(el);
+    if (!cust) {
+      cust = document.createElement('style');
+      cust.id = 'qa-custom-css';
     }
-    el.textContent = theme.css;
-  } else if (el) {
-    el.remove();
+    cust.textContent = theme.css;
+  } else if (cust) {
+    cust.remove();
+    cust = null;
   }
+
+  // 重新追加到 <head> 末尾来固定顺序（appendChild 对已有元素是"移动"）
+  // 顺序：--- vars --- 然后 --- 自定义 CSS ---
+  document.head.appendChild(vars);
+  if (cust) document.head.appendChild(cust);
 }
 
 function saveTheme() {
@@ -292,6 +307,22 @@ function renderThemeForm() {
   $('#theme-width-val').textContent = theme.width + 'px';
   $('#theme-css').value = theme.css;
   $('#theme-js').value = theme.js;
+
+  updateThemeConflict();
+}
+
+/* 冲突提醒：自定义 CSS 里也设了 --primary 的话，它会盖掉取色器选的颜色。
+   打字时要实时更新，所以单独抽出来。 */
+function updateThemeConflict() {
+  const warn = $('#theme-conflict');
+  if (!warn) return;
+
+  const clash = !!theme.primary && /--primary\s*:/.test(theme.css || '');
+  warn.classList.toggle('hidden', !clash);
+  warn.textContent = clash
+    ? '⚠️ 你的自定义 CSS 里也设了 --primary，按优先级它会覆盖上面取色器选的颜色。'
+      + '想用取色器的颜色，就把 CSS 里那行删掉（或者点「一键还原」重来）。'
+    : '';
 }
 
 function openTheme() {
@@ -1240,11 +1271,10 @@ function renderList() {
           `<button class="tab ${ui.filter === k ? 'is-active' : ''}" data-action="filter" data-filter="${k}">${label}</button>`
         ).join('')}
       </div>
-      <div class="tagbar">
-        ${ui.tag || ui.q ? '<button class="tag" data-action="clear">清除筛选 ✕</button>' : ''}
-        ${tagbar}
-      </div>
+      ${(ui.tag || ui.q) ? '<button class="btn btn-ghost btn-sm" data-action="clear">清除筛选 ✕</button>' : ''}
     </div>
+
+    ${tagbar ? `<div class="tagbar"><span class="tagbar-label">标签</span>${tagbar}</div>` : ''}
 
     <div class="qlist">${cards}</div>`;
 
@@ -1964,11 +1994,12 @@ document.addEventListener('input', e => {
   else if (id === 'theme-font') { theme.font = Number(e.target.value); $('#theme-font-val').textContent = theme.font + 'px'; }
   else if (id === 'theme-radius') { theme.radius = Number(e.target.value); $('#theme-radius-val').textContent = theme.radius + 'px'; }
   else if (id === 'theme-width') { theme.width = Number(e.target.value); $('#theme-width-val').textContent = theme.width + 'px'; }
-  else if (id === 'theme-css') theme.css = e.target.value;
+  else if (id === 'theme-css') { theme.css = e.target.value; updateThemeConflict(); }
   else if (id === 'theme-js') theme.js = e.target.value;
   else if (id === 'src-editor') {
     // 源码编辑器里有近千行，每敲一个字都重解析会卡 —— 防抖 400ms
     theme.css = e.target.value;
+    updateThemeConflict();
     clearTimeout(srcApplyTimer);
     srcApplyTimer = setTimeout(() => { applyTheme(); saveTheme(); }, 400);
     return;
