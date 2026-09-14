@@ -1388,3 +1388,42 @@ $$;
 
 grant execute on function public.update_question(uuid, text, text) to authenticated;
 grant execute on function public.update_answer(uuid, text)          to authenticated;
+
+
+-- ============================================================================
+-- 18. 大管理者踢成员
+--
+--     ⚠️ 技术要点：auth.users 归 Supabase Auth 管，普通角色（anon/authenticated）
+--        删不了它。security definer 函数是以**建函数的人**的身份运行的 ——
+--        在 SQL Editor 里建就是 postgres，它有 auth.users 的删除权限。
+--        所以这个函数能删，但必须在 SQL Editor 里执行本脚本（别用别的角色）。
+--
+--     ⚠️ 这是**硬删**：会级联删掉这个人的 profiles，以及他所有的问题 / 回答 /
+--        点赞 / 收藏 / 通知。前端在确认框里会把"要删掉多少内容"写清楚。
+--        只想让他不能管事、但要保留内容 → 用「成员」面板把角色改成普通用户即可。
+-- ============================================================================
+create or replace function public.kick_member(p_user_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+  if public.my_role() <> 'super_admin' then raise exception '只有大管理者能踢人'; end if;
+  if p_user_id = auth.uid() then raise exception '不能踢自己'; end if;
+  if not exists (select 1 from public.profiles where id = p_user_id) then
+    raise exception '这个人不存在';
+  end if;
+
+  -- 先确认当前角色真的删得动 auth.users，不行就给一条能照做的提示
+  if not has_table_privilege('auth.users', 'DELETE') then
+    raise exception '当前数据库角色没有删除用户的权限；请在 SQL Editor 里执行：delete from auth.users where id = ''%''', p_user_id;
+  end if;
+
+  -- 删 auth 用户 → 级联删掉 profiles 和他所有内容
+  delete from auth.users where id = p_user_id;
+end;
+$$;
+
+grant execute on function public.kick_member(uuid) to authenticated;

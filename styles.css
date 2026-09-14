@@ -798,6 +798,10 @@ h1, h2, h3, p { margin: 0; }
 .member-actions .btn { padding: 3px 8px; font-size: 12px; }
 .member-actions .btn.is-current { background: var(--primary); border-color: var(--primary); color: #fff; }
 
+/* 危险操作（踢人） */
+.btn-danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+.btn-danger:hover { filter: brightness(1.12); }
+
 /* 资料没补全时顶部的提示条 */
 .app-banner {
   width: 100%;

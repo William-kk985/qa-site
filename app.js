@@ -348,6 +348,12 @@ const api = {
     if (error) throw error;
   },
 
+  /* 踢成员（硬删：账号 + 他的所有内容）。只有大管理者能调。 */
+  async kickMember(userId) {
+    const { error } = await sb.rpc('kick_member', { p_user_id: userId });
+    if (error) throw error;
+  },
+
   async listMembers() {
     // 用 weekly_stats 函数拿：它带真名、参赛年数、本周提问/回答数
     // （真名没有开放列级查询权限，只有管理者能通过这个函数看到）
@@ -868,6 +874,11 @@ function renderMembers() {
                   data-name="${esc(m.display_name)}" ${isSelf ? 'disabled' : ''}>
             ${ROLE_LABEL[r]}
           </button>`).join('')
+        + (isSelf ? '' : `
+          <button class="btn btn-danger btn-sm" data-action="kick" data-u="${m.user_id}"
+                  data-name="${esc(m.display_name)}"
+                  data-q="${m.questions_total === undefined ? 0 : m.questions_total}"
+                  data-a="${m.answers_total === undefined ? 0 : m.answers_total}">踢出</button>`)
       : '';
 
     return `<div class="member-row">
@@ -1407,6 +1418,22 @@ document.addEventListener('click', async e => {
       case 'members':
         await openMembers();
         break;
+
+      case 'kick': {
+        const name = el.dataset.name;
+        const qn = el.dataset.q, an = el.dataset.a;
+        if (!confirm(
+          `确定把「${name}」踢出吗？\n\n` +
+          `⚠️ 这是硬删除：他会失去账号，而且他发的 ${qn} 条问题、${an} 条回答会一并消失，不可恢复。\n\n` +
+          `如果只是想让他不再管事、但要保留内容，请改用左边的角色按钮把他改成「普通用户」。`
+        )) return;
+
+        await api.kickMember(el.dataset.u);
+        await api.listMembers();
+        renderMembers();
+        toast('已踢出：' + name);
+        break;
+      }
 
       case 'remind-incomplete': {
         const text = prompt(
