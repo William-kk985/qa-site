@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>问答站</title>
+<meta name="description" content="一个提问 / 回答的社区：发问题、写回答、选最佳答案。">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#/">
+      <span class="brand-mark">问</span>
+      <span class="brand-text">问答站</span>
+    </a>
+
+    <form class="search" id="search-form" role="search">
+      <input id="search-input" type="search" placeholder="搜索问题、标签…" autocomplete="off" aria-label="搜索">
+    </form>
+
+    <div class="topbar-actions">
+      <button class="btn btn-primary" data-action="ask">提问题</button>
+      <div id="user-box" class="user-box"></div>
+    </div>
+  </div>
+</header>
+
+<main id="app" class="app">
+  <div class="empty"><div class="big">⏳</div><p>正在加载…</p></div>
+</main>
+
+<footer class="foot">
+  <span>提问和回答都保存在云端，任何人都能看到 · 发言需要注册（邮箱即可，不用 GitHub）</span>
+</footer>
+
+<!-- 登录 / 注册弹窗 -->
+<div class="modal-mask hidden" id="modal-mask">
+  <div class="modal mode-login" id="modal">
+    <h2 class="modal-title" id="modal-title">登录</h2>
+    <p class="modal-sub" id="modal-sub">用一个邮箱注册就行，不需要 GitHub 账号。</p>
+
+    <div class="tabs auth-tabs">
+      <button type="button" class="tab is-active" data-action="auth-mode" data-mode="login">登录</button>
+      <button type="button" class="tab" data-action="auth-mode" data-mode="signup">注册</button>
+    </div>
+
+    <form id="auth-form">
+      <label class="field signup-only">
+        <span class="field-label">昵称（别人看到的名字）</span>
+        <input name="display_name" maxlength="16" placeholder="例如：小明" autocomplete="nickname">
+      </label>
+      <label class="field">
+        <span class="field-label">邮箱</span>
+        <input name="email" type="email" required autocomplete="email" placeholder="you@example.com">
+      </label>
+      <label class="field">
+        <span class="field-label">密码</span>
+        <input name="password" type="password" required minlength="6" autocomplete="current-password" placeholder="至少 6 位">
+      </label>
+
+      <p class="form-error hidden" id="auth-error"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary" id="auth-submit">登录</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 我的账号：改昵称 / 退出登录 -->
+<div class="modal-mask hidden" id="profile-mask">
+  <div class="modal">
+    <h2 class="modal-title">我的账号</h2>
+    <p class="modal-sub">登录邮箱：<b id="profile-email"></b></p>
+    <form id="profile-form">
+      <label class="field">
+        <span class="field-label">昵称（别人看到的名字）</span>
+        <input name="display_name" maxlength="16" required placeholder="例如：小明">
+      </label>
+      <p class="form-error hidden" id="profile-error"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="logout">退出登录</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="config.js"></script>
+<script src="vendor/supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
