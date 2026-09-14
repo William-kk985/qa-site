@@ -302,6 +302,20 @@ const api = {
     if (error) throw error;
   },
 
+  async adminDeleteAnswer(answerId, reason) {
+    const { error } = await sb.rpc('admin_delete_answer',
+      { p_answer_id: answerId, p_reason: reason });
+    if (error) throw error;
+  },
+
+  /* 改标签：本人和"管得到他"的管理者都能调，权限在数据库函数里再查一遍 */
+  async setQuestionTags(questionId, tags) {
+    const { data, error } = await sb.rpc('set_question_tags',
+      { p_question_id: questionId, p_tags: tags });
+    if (error) throw error;
+    return data;
+  },
+
   async sendReminder(userId, text) {
     const { error } = await sb.rpc('send_reminder', { p_user_id: userId, p_text: text });
     if (error) throw error;
@@ -1041,6 +1055,8 @@ function renderDetail(q) {
                   data-q="${q.id}" data-a="${a.id}">${accepted ? '取消最佳' : '设为最佳'}</button>` : ''}
           ${isMine(a.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-a"
                   data-q="${q.id}" data-a="${a.id}">删除</button>` : ''}
+          ${canManage(a.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-a-admin"
+                  data-q="${q.id}" data-a="${a.id}" data-name="${esc(a.author.name)}">删除（管理）</button>` : ''}
         </div>
       </div>
       <div class="body-text">${esc(a.body)}</div>
@@ -1094,6 +1110,8 @@ function renderDetail(q) {
           ${bookmarkBtn(q.id)}
 
           ${isMine(q.author) ? `
+            <button class="btn btn-soft btn-sm" data-action="edit-tags" data-q="${q.id}"
+                    data-tags="${esc(q.tags.join(','))}">改标签</button>
             <button class="btn btn-soft btn-sm" data-action="toggle-status" data-q="${q.id}"
                     data-status="${q.status === 'solved' ? 'open' : 'solved'}">
               ${q.status === 'solved' ? '改回待回答' : '标记为已解决'}
@@ -1101,8 +1119,10 @@ function renderDetail(q) {
             <button class="btn btn-ghost btn-sm" data-action="del-q" data-q="${q.id}">删除问题</button>` : ''}
 
           ${canManage(q.author) ? `
+            <button class="btn btn-soft btn-sm" data-action="edit-tags" data-q="${q.id}"
+                    data-tags="${esc(q.tags.join(','))}">直接改标签</button>
             <button class="btn btn-ghost btn-sm" data-action="remind"
-                    data-u="${q.author.id}" data-name="${esc(q.author.name)}">提醒整理标签</button>
+                    data-u="${q.author.id}" data-name="${esc(q.author.name)}">提醒改标签</button>
             <button class="btn btn-ghost btn-sm" data-action="admin-del-q" data-q="${q.id}"
                     data-name="${esc(q.author.name)}">删除（附理由）</button>` : ''}
         </div>
@@ -1270,6 +1290,29 @@ document.addEventListener('click', async e => {
         await route();
         toast(el.dataset.status === 'solved' ? '已标记为已解决' : '已改回待回答');
         break;
+
+      case 'edit-tags': {
+        const input = prompt('标签（用逗号分隔，最多 5 个，留空就是清掉）：', el.dataset.tags || '');
+        if (input === null) return;
+        const tags = input.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean).slice(0, 5);
+        const saved = await api.setQuestionTags(el.dataset.q, tags);
+        await api.list();
+        await route();
+        toast('标签已更新：' + (saved && saved.length ? saved.join('、') : '（已清空）'));
+        break;
+      }
+
+      case 'del-a-admin': {
+        const reason = prompt(
+          `删除「${el.dataset.name}」的这条回答？\n\n请填删除理由，会发通知告诉他：`,
+          '回答与问题无关 / 内容不符合规范');
+        if (reason === null) return;
+        await api.adminDeleteAnswer(el.dataset.a, reason);
+        await api.list();
+        await route();
+        toast('回答已删除，并已通知作者');
+        break;
+      }
 
       case 'admin-del-q': {
         const reason = prompt(

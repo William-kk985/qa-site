@@ -1164,3 +1164,123 @@ from public.profiles;
 --        管理者   → **只能管普通用户**（管不了其他管理者，也管不了大管理者）
 --        大管理者 → 能管所有人（除了自己），包括管理者
 -- ---------------------------------------------------------------------------
+
+
+-- ============================================================================
+-- 16. 改标签
+--
+--     背景：管理者能「提醒用户改标签」，但如果用户自己都不能改，那提醒也白搭。
+--     所以这个函数**本人和管得到他的管理者都能用**：
+--       · 本人           → 改自己问题的标签
+--       · 管理者         → 直接改「普通用户」问题的标签（管不了管理者 / 大管理者）
+--       · 大管理者       → 改任何人的（除了自己那行走"本人"那条路）
+--
+--     管理者替别人改完，会给作者发一条通知，让他知道标签被动了。
+-- ============================================================================
+create or replace function public.set_question_tags(p_question_id uuid, p_tags text[])
+returns text[]
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_author uuid;
+  v_uid    uuid := auth.uid();
+  v_tags   text[];
+begin
+  if v_uid is null then raise exception '请先登录'; end if;
+
+  select author_id into v_author from public.questions where id = p_question_id;
+  if v_author is null then raise exception '问题不存在'; end if;
+
+  -- 本人，或者「管得到他」的管理者
+  if v_author <> v_uid and not public.can_manage(v_author) then
+    raise exception '你没有权限改这个问题的标签';
+  end if;
+
+  -- 清洗：去空白、去空项、去重、每个最长 20 字、最多 5 个
+  select coalesce(array_agg(distinct t), '{}'::text[])
+    into v_tags
+    from (
+      select left(trim(x), 20) as t
+        from unnest(coalesce(p_tags, '{}'::text[])) as x
+       where trim(x) <> ''
+       limit 5
+    ) s;
+
+  update public.questions set tags = v_tags where id = p_question_id;
+
+  -- 管理者替别人改的，通知作者一声
+  if v_author <> v_uid then
+    insert into public.notifications (user_id, actor_id, type, question_id, note)
+    values (
+      v_author, v_uid, 'remind', p_question_id,
+      '帮你把标签改成了：' ||
+      case when cardinality(v_tags) = 0 then '（清空）' else array_to_string(v_tags, '、') end
+    );
+  end if;
+
+  return v_tags;
+end;
+$$;
+
+grant execute on function public.set_question_tags(uuid, text[]) to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 16.1 权限总表（前后端都按这张表实现，改代码前先对一遍）
+--
+--   能力                        | 普通用户 | 管理者 | 大管理者
+--   ---------------------------|---------|--------|------------------
+--   改自己的标签                 |   ✅    |   ✅   |   ✅
+--   改普通用户的标签             |   ❌    |   ✅   |   ✅
+--   改管理者 / 大管理者的标签     |   ❌    |   ❌   |   ✅（除自己）
+--   提醒普通用户                  |   ❌    |   ✅   |   ✅
+--   提醒管理者 / 大管理者         |   ❌    |   ❌   |   ✅（除自己）
+--   删普通用户的问题 / 回答       |   ❌    |   ✅   |   ✅
+--   删管理者 / 大管理者的内容     |   ❌    |   ❌   |   ✅（除自己）
+--   看成员列表（含真名 / 统计）   |   ❌    |   ✅   |   ✅
+--   任命 / 撤销角色              |   ❌    |   ❌   |   ✅
+--   群发"补全资料"提醒           |   ❌    |   ❌   |   ✅
+-- ---------------------------------------------------------------------------
+
+
+-- ---------------------------------------------------------------------------
+-- 16.2 管理者删除**回答**
+--      和删问题一样的规矩（管得到作者才让删），也会先给作者发一条带理由的通知。
+--      通知里 question_id 故意留空，否则回答一删通知会被级联删掉。
+-- ---------------------------------------------------------------------------
+create or replace function public.admin_delete_answer(p_answer_id uuid, p_reason text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_author uuid;
+  v_title  text;
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+
+  select a.author_id, q.title
+    into v_author, v_title
+    from public.answers a
+    left join public.questions q on q.id = a.question_id
+   where a.id = p_answer_id;
+
+  if v_author is null then raise exception '回答不存在'; end if;
+  if v_author = auth.uid() then raise exception '这是你自己的回答，请直接点「删除」'; end if;
+  if not public.can_manage(v_author) then raise exception '你没有权限删除这个人的回答'; end if;
+
+  insert into public.notifications (user_id, actor_id, type, question_id, note)
+  values (
+    v_author, auth.uid(), 'removed', null,
+    coalesce(nullif(trim(p_reason), ''), '内容不符合规范') ||
+    '｜你在《' || coalesce(v_title, '已删除的问题') || '》下的回答'
+  );
+
+  delete from public.answers where id = p_answer_id;
+end;
+$$;
+
+grant execute on function public.admin_delete_answer(uuid, text) to authenticated;
