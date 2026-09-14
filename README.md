@@ -127,6 +127,44 @@ Authentication → **Sign In / Providers** → 找到 **GitHub** → 打开开�
 
 > 配了 GitHub 登录之后，**邮箱注册那条路可以留着当备胎**，也随时可以按上面的「忘记密码」那节把 SMTP 配上。
 
+## 源码是公开的：什么安全、什么绝对不能提交
+
+GitHub Pages 免费版只能用**公开仓库**，所以这个仓库里的一切**任何人都能看到**（包括 `config.js` 和 `schema.sql`）。这是设计如此，不是漏洞 —— 但要知道边界在哪：
+
+| 仓库里的东西 | 公开安全吗 | 为什么 |
+|---|---|---|
+| `config.js` 里的 **Project URL** 和 **publishable key** | ✅ **安全** | 它本来就是要放在前端、每个访客都能拿到的。能不能改数据**由数据库的 RLS 规则决定**，不是靠藏这个 key |
+| `supabase/schema.sql` | ✅ 安全 | 公开表结构和权限规则**反而更好**（别人能帮你审查有没有漏配 RLS） |
+| 前端全部代码 | ✅ 安全 | 里面没有任何密钥 |
+| **`service_role` key / `sb_secret_...`** | ❌ **绝对不能提交** | 它能**绕过所有 RLS**，等于数据库裸奔。一旦进了 git 历史，删文件也没用，必须去 Supabase 后台**轮换（rotate）**掉 |
+| 数据库密码 | ❌ 绝不能提交 | 同上 |
+| 测试脚本里的真实邮箱 / 密码 | ❌ 绝不能提交 | 本项目的 `.preview/` 就是放这些的，已经在 `.gitignore` 里，**永远不要 `git add -f`** |
+| 提交作者邮箱 | ⚠️ 会公开 | 每个 commit 都带着 `user.email` |
+
+### 介意提交邮箱被公开怎么办
+
+```bash
+# 1. GitHub → Settings → Emails 勾上 "Keep my email addresses private"，
+#    页面会给你一个 <数字ID>+<用户名>@users.noreply.github.com
+# 2. 让以后的提交用它
+git config user.email "你的noreply邮箱@users.noreply.github.com"
+```
+
+> 注意：**这只影响以后的提交**。已存在的提交里还是旧邮箱 —— 要彻底清掉得重写历史
+> （`git filter-repo` + 强制推送），会改掉所有提交 hash。项目小、没别人协作的话可以做，
+> 但**不是必须的**。
+
+### 想让人一起改代码，别直接给仓库写权限
+
+走 **fork → 提 PR** 的流程：
+
+1. 对方 fork 这个仓库
+2. 改完提 Pull Request
+3. 你 review 后合并 → GitHub Actions 自动重新部署 → 所有人看到新版本
+
+这样**不用把写权限给出去**，而且每次改动都留痕、可回滚。真需要长期协作者，再在
+仓库 Settings → Collaborators 里单独加人。
+
 ## 给接手的人（技术交接）
 
 ### 整体结构
