@@ -786,6 +786,56 @@ h1, h2, h3, p { margin: 0; }
 }
 .snippet:hover { border-style: solid; border-color: var(--primary); color: var(--primary); }
 
+/* 「一键还原」按钮：看得见但不刺眼 */
+.btn-reset {
+  background: transparent;
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger-text) 45%, transparent);
+}
+.btn-reset:hover {
+  filter: none;
+  background: color-mix(in srgb, var(--danger-text) 10%, transparent);
+}
+
+/* 「看源码」面板 */
+.src-note {
+  margin: 10px 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+#src-editor, .src-view {
+  width: 100%;
+  min-height: 320px;
+  max-height: 46vh;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+  white-space: pre;
+  tab-size: 2;
+}
+#src-editor:focus { border-color: var(--primary); background: var(--surface); outline: none; }
+.src-view { white-space: pre-wrap; word-break: break-word; }
+.src-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
 /* 「找回密码」弹窗里的「没收到邮件怎么办」 */
 .reset-help {
   margin: 4px 0 14px;

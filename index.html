@@ -55,7 +55,6 @@
 
 <footer class="foot">
   <span>提问和回答都保存在云端，任何人都能看到 · 用 GitHub 账号一键登录，也可以邮箱注册</span>
-  <button class="linkbtn" data-action="theme">自定义外观</button>
 </footer>
 
 <!-- 登录 / 注册弹窗 -->
@@ -138,7 +137,6 @@
         <div>
           <button type="button" class="btn btn-ghost btn-sm hidden" id="members-btn"
                   data-action="members">成员管理</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-action="theme">自定义外观</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="change-password">修改密码</button>
           <button type="button" class="btn btn-ghost btn-sm" data-action="logout">退出登录</button>
         </div>
@@ -277,13 +275,17 @@
   <div class="modal modal-wide">
     <div class="modal-head">
       <h2 class="modal-title">自定义外观</h2>
-      <button type="button" class="linkbtn" data-action="theme-reset">恢复默认</button>
+      <div class="tabs">
+        <button type="button" class="tab is-active" data-action="theme-tab" data-tab="basic">外观</button>
+        <button type="button" class="tab" data-action="theme-tab" data-tab="source">看源码</button>
+      </div>
     </div>
     <p class="modal-sub">
       设置只保存在<b>你这台设备的这个浏览器</b>里 —— 不影响别人，换设备要重新设。
-      改坏了点右上角「恢复默认」；万一面板都打不开，在网址后面加 <code>?reset=1</code> 也能还原。
+      改坏了点下面的「一键还原」；万一面板都打不开，在网址后面加 <code>?reset=1</code> 也能还原。
     </p>
 
+    <div id="theme-pane-basic">
     <div class="theme-grid">
       <label class="field">
         <span class="field-label">主题色</span>
@@ -346,9 +348,31 @@
                   placeholder="// 例：改站点名字&#10;document.querySelector('.brand-text').textContent = '我们队的问答站';"></textarea>
       </label>
     </details>
+    </div><!-- /#theme-pane-basic -->
 
-    <div class="modal-actions">
-      <button type="button" class="btn btn-ghost" data-action="close-modal">关闭</button>
+    <!-- ============ 看源码 ============ -->
+    <div id="theme-pane-source" class="hidden">
+      <p class="hint" style="margin-bottom:10px">
+        下面就是<b>本站正在线上运行的源代码</b>，可以直接读、复制。
+        <b>styles.css 还能直接改，改完立刻生效</b> —— 整站的外观、间距、布局都在这个文件里。
+      </p>
+
+      <div class="tabs" id="src-tabs"></div>
+      <div class="src-note" id="src-note"></div>
+
+      <textarea id="src-editor" spellcheck="false"></textarea>
+      <pre id="src-view" class="src-view hidden"></pre>
+
+      <div class="src-actions">
+        <button type="button" class="btn btn-soft btn-sm" data-action="src-load">载入线上原版</button>
+        <button type="button" class="btn btn-soft btn-sm" data-action="src-copy">复制全部</button>
+        <span class="faint" id="src-status"></span>
+      </div>
+    </div>
+
+    <div class="modal-actions modal-actions-split">
+      <button type="button" class="btn btn-reset" data-action="theme-reset">一键还原</button>
+      <button type="button" class="btn btn-primary" data-action="close-modal">关闭</button>
     </div>
   </div>
 </div>

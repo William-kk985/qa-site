@@ -298,9 +298,99 @@ function openTheme() {
   renderSnippets();
   renderThemeForm();
   $('#theme-mask').classList.remove('hidden');
+
+  // 恢复上次看的页签
+  $$('[data-action="theme-tab"]').forEach(t =>
+    t.classList.toggle('is-active', t.dataset.tab === ui.themeTab));
+  $('#theme-pane-basic').classList.toggle('hidden', ui.themeTab !== 'basic');
+  $('#theme-pane-source').classList.toggle('hidden', ui.themeTab !== 'source');
+  if (ui.themeTab === 'source') renderSrc();
 }
 
 function closeTheme() { $('#theme-mask').classList.add('hidden'); }
+
+/* ------------------------------ 「看源码」-----------------------------
+   给懂前端的人一个入口：直接看**线上正在跑**的源码。
+     · styles.css          → ✅ 可编辑，改完立刻生效（其实就是写进自定义 CSS）
+     · index.html / app.js → 👀 只能看（原因写在下面的 note 里）
+   -------------------------------------------------------------------- */
+const SRC_FILES = [
+  {
+    key: 'styles.css',
+    editable: true,
+    note: '样式表。✅ 可以直接改，改完立刻生效 —— 整站的颜色、间距、布局、显隐都在这里。'
+        + '改的只是你自己浏览器里那份，不影响别人。',
+  },
+  {
+    key: 'index.html',
+    editable: false,
+    note: '页面骨架。👀 只能看：顶栏和各个弹窗是它渲染的，但问题列表 / 详情页这些主体'
+        + '是 app.js 在运行时生成的 —— 直接改这里会被下一次渲染冲掉。'
+        + '想动主体结构，请用 styles.css 调样式，或者去 GitHub 提 PR。',
+  },
+  {
+    key: 'app.js',
+    editable: false,
+    note: '全部逻辑。👀 只能看：这就是你正在用的这个程序，替换它等于自毁。'
+        + '想加东西请用「外观」页签里的「自定义 JS」—— 那是追加的，不替换原程序。',
+  },
+];
+
+let srcCache = {};
+let srcCurrent = 'styles.css';
+let srcApplyTimer = null;
+
+async function loadSrc(key) {
+  if (srcCache[key] !== undefined) return srcCache[key];
+  try {
+    const res = await fetch(key, { cache: 'no-cache' });
+    srcCache[key] = res.ok ? await res.text() : '（读取失败：HTTP ' + res.status + '）';
+  } catch (e) {
+    srcCache[key] = '（读取失败：' + e.message + '）';
+  }
+  return srcCache[key];
+}
+
+async function renderSrc() {
+  const box = $('#src-tabs');
+  if (!box) return;
+
+  box.innerHTML = SRC_FILES.map(f =>
+    `<button type="button" class="tab ${f.key === srcCurrent ? 'is-active' : ''}"
+             data-action="src-tab" data-key="${f.key}">${f.key}</button>`).join('');
+
+  const f = SRC_FILES.find(x => x.key === srcCurrent) || SRC_FILES[0];
+  $('#src-note').textContent = f.note;
+  $('#src-status').textContent = '';
+
+  const text = await loadSrc(f.key);
+  const ta = $('#src-editor');
+  const view = $('#src-view');
+
+  if (f.editable) {
+    ta.classList.remove('hidden');
+    view.classList.add('hidden');
+
+    // 显示「线上源码 + 你自己加的部分」：
+    //   · 没改过 → 只显示线上源码
+    //   · 改过（整份源码级）→ 显示你那份
+    //   · 只加了一小段覆盖 → 源码在下、你的改动在最后，带一条醒目分隔
+    const mine = (theme.css || '').trim();
+    if (!mine) {
+      ta.value = text;
+    } else if (mine.length > text.length * 0.5) {
+      ta.value = mine;
+    } else {
+      ta.value = text
+        + '\n\n/* ========== 下面是你自己加的部分（在线源码的基础上） ========== */\n'
+        + mine;
+    }
+  } else {
+    ta.classList.add('hidden');
+    view.classList.remove('hidden');
+    view.textContent = text;
+  }
+}
 
 /* 把示例片段渲染成可点的按钮 */
 function renderSnippets() {
@@ -314,7 +404,7 @@ function renderSnippets() {
   fill('#css-snippets', CSS_SNIPPETS, 'css');
   fill('#js-snippets', JS_SNIPPETS, 'js');
 }
-const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all' };
+const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all', themeTab: 'basic' };
 let lastViewedId = null;
 let authMode = 'login';
 
@@ -1512,6 +1602,44 @@ document.addEventListener('click', async e => {
         openTheme();
         break;
 
+      case 'theme-tab': {
+        ui.themeTab = el.dataset.tab;
+        $$('[data-action="theme-tab"]').forEach(t =>
+          t.classList.toggle('is-active', t.dataset.tab === ui.themeTab));
+        $('#theme-pane-basic').classList.toggle('hidden', ui.themeTab !== 'basic');
+        $('#theme-pane-source').classList.toggle('hidden', ui.themeTab !== 'source');
+        if (ui.themeTab === 'source') await renderSrc();
+        break;
+      }
+
+      case 'src-tab':
+        srcCurrent = el.dataset.key;
+        await renderSrc();
+        break;
+
+      case 'src-load': {
+        if (!confirm('把编辑框恢复成线上原版的 styles.css？你自己改过的内容会被覆盖。')) return;
+        const online = await loadSrc('styles.css');
+        $('#src-editor').value = online;
+        theme.css = online;   // 让"看到的就是生效的"
+        applyTheme();
+        saveTheme();
+        toast('已载入线上原版，可以开始改了');
+        break;
+      }
+
+      case 'src-copy': {
+        const f = SRC_FILES.find(x => x.key === srcCurrent) || SRC_FILES[0];
+        const text = f.editable ? $('#src-editor').value : $('#src-view').textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          $('#src-status').textContent = '已复制 ' + text.length + ' 个字符';
+        } catch (_) {
+          toast('复制失败，请手动全选复制');
+        }
+        break;
+      }
+
       case 'theme-reset':
         if (!confirm('恢复默认外观？你自己写的 CSS / JS 也会一并清掉。')) return;
         resetTheme();
@@ -1838,6 +1966,13 @@ document.addEventListener('input', e => {
   else if (id === 'theme-width') { theme.width = Number(e.target.value); $('#theme-width-val').textContent = theme.width + 'px'; }
   else if (id === 'theme-css') theme.css = e.target.value;
   else if (id === 'theme-js') theme.js = e.target.value;
+  else if (id === 'src-editor') {
+    // 源码编辑器里有近千行，每敲一个字都重解析会卡 —— 防抖 400ms
+    theme.css = e.target.value;
+    clearTimeout(srcApplyTimer);
+    srcApplyTimer = setTimeout(() => { applyTheme(); saveTheme(); }, 400);
+    return;
+  }
   else return;
 
   applyTheme();
