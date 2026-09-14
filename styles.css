@@ -637,6 +637,7 @@ h1, h2, h3, p { margin: 0; }
 
 /* ---------------------------- 站内通知 ---------------------------- */
 .bell-btn { position: relative; padding: 6px 10px; display: inline-flex; align-items: center; }
+.icon-btn { padding: 6px 10px; display: inline-flex; align-items: center; }
 
 .bell-badge {
   position: absolute;
@@ -770,6 +771,20 @@ h1, h2, h3, p { margin: 0; }
   font-size: 12.5px;
   line-height: 1.6;
 }
+
+/* 示例代码片段：点一下填进输入框 */
+.snippets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.snippet {
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.snippet:hover { border-style: solid; border-color: var(--primary); color: var(--primary); }
 
 /* 「找回密码」弹窗里的「没收到邮件怎么办」 */
 .reset-help {

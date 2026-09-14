@@ -185,6 +185,23 @@ const THEME_DEFAULTS = {
 const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
                        '#dc2626', '#db2777', '#7c3aed', '#475569'];
 
+/* 示例片段：给不太会写的人一个起点 —— 点一下填进去，再自己改 */
+const CSS_SNIPPETS = [
+  { label: '主色改红', css: ':root { --primary: #dc2626; }' },
+  { label: '全部改成直角', css: ':root { --radius: 0px; }' },
+  { label: '卡片加边框', css: '.qcard { border: 2px solid var(--primary); }' },
+  { label: '隐藏右侧统计', css: '.qcard-side { display: none; }' },
+  { label: '隐藏顶部统计条', css: '.stats { display: none; }' },
+  { label: '标题大一点', css: '.qcard-main h3 { font-size: 20px; }' },
+  { label: '紧凑一点', css: ':root { --card-pad: 8px 12px; --list-gap: 6px; }' },
+];
+
+const JS_SNIPPETS = [
+  { label: '改站点名字', js: "document.querySelector('.brand-text').textContent = '我们队的问答站';" },
+  { label: '给页面加提示条', js: "const d=document.createElement('div');\nd.style.cssText='padding:8px 14px;background:#fef3c7;color:#92400e;font-size:13px';\nd.textContent='这段字是我自己加的';\ndocument.body.prepend(d);" },
+  { label: '控制台打招呼', js: "console.log('这是我自己加的代码，只在我浏览器里跑');" },
+];
+
 let theme = { ...THEME_DEFAULTS };
 
 function loadTheme() {
@@ -278,11 +295,25 @@ function renderThemeForm() {
 }
 
 function openTheme() {
+  renderSnippets();
   renderThemeForm();
   $('#theme-mask').classList.remove('hidden');
 }
 
 function closeTheme() { $('#theme-mask').classList.add('hidden'); }
+
+/* 把示例片段渲染成可点的按钮 */
+function renderSnippets() {
+  const fill = (boxSel, list, field) => {
+    const box = $(boxSel);
+    if (!box) return;
+    box.innerHTML = list.map((s, i) =>
+      `<button type="button" class="snippet" data-action="theme-snippet"
+               data-field="${field}" data-i="${i}">+ ${esc(s.label)}</button>`).join('');
+  };
+  fill('#css-snippets', CSS_SNIPPETS, 'css');
+  fill('#js-snippets', JS_SNIPPETS, 'js');
+}
 const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all' };
 let lastViewedId = null;
 let authMode = 'login';
@@ -1492,6 +1523,21 @@ document.addEventListener('click', async e => {
         saveTheme();
         renderThemeForm();
         break;
+
+      case 'theme-snippet': {
+        const isCss = el.dataset.field === 'css';
+        const s = (isCss ? CSS_SNIPPETS : JS_SNIPPETS)[Number(el.dataset.i)];
+        if (!s) return;
+
+        const ta = $(isCss ? '#theme-css' : '#theme-js');
+        const add = isCss ? s.css : s.js;
+        ta.value = ta.value.trim() ? ta.value.replace(/\s+$/, '') + '\n\n' + add : add;
+
+        // 触发一次 input，让 applyTheme + 保存 走同一条路
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.scrollTop = ta.scrollHeight;
+        break;
+      }
 
       case 'me':
         if ((location.hash || '#/') === '#/me') await renderMy();
