@@ -337,7 +337,10 @@ Python 没法编译成一个几百字节的产物 —— **它的运行时本身
 > 前两个是**纯数字**，任何语言都能写。第三个要吃**字符串** —— 这是能力上的分水岭：
 > JS / TypeScript / ReScript / Python 原生就有字符串，几乎是白送；
 > **wasm（C / C++ / Rust）要多导出一个 `qa_buffer()`** 走内存协议；
-> **MoonBit 目前做不到**（拿不到裸指针，编译器也不导出 memory）。详见 `plugins/README.md`。
+> **MoonBit 要多配两处**：`moon.pkg` 里写 `export-memory-name` 才会导出内存，
+> 再用 inline wasm（`extern "wasm" fn`）拿到缓冲区地址 —— 两条都做了就一样能用。
+> 「某语言能不能做某件事」别只查 API，也要查构建配置（我在这上面判断错过一次）。
+> 详见 `plugins/README.md`。
 >
 > 搜索那条**只排序、不过滤**是刻意的：让插件参与过滤的话，一个有 bug 的插件会让
 > 搜索结果凭空消失，用户完全不知道为什么。只排序的话，最坏是顺序难看。

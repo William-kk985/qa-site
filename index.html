@@ -394,7 +394,8 @@
         （<b>只排序，不过滤</b>：写坏了最坏是顺序难看，不会让结果消失）<br>
         <span class="faint">前两个是纯数字，任何语言都能写。<code>search_score</code>
         要吃字符串：JS / TypeScript / ReScript / Python 直接写就行；wasm（C / C++ / Rust）
-        要多导出一个 <code>qa_buffer()</code> 走内存协议；<b>MoonBit 目前做不到</b>。
+        要多导出一个 <code>qa_buffer()</code> 走内存协议；MoonBit 要额外配
+        <code>export-memory-name</code> + inline wasm（也做到了）。
         细节见 <code>plugins/README.md</code>。</span>
       </div>
 

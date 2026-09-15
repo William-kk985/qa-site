@@ -340,18 +340,43 @@ C 那份示范在 `plugins/c/example.c`（静态数组当缓冲区，零依赖�
 > 和 wasm 侧（拿到的是字节）会算出不同结果。示例里所有语言都先 encode 再比，
 > 所以 `plugins/verify.mjs` 能断言它们**逐位相同**。
 
-### MoonBit 目前做不到这个
+### MoonBit 也能做 —— 但要动两个"不常看的地方"
 
-不是漏了，是平台现状：**MoonBit 拿不到裸指针**。
+**我一开始以为 MoonBit 做不到，结论是错的。** 错在只查了运行时 API：
+core 库里确实**没有任何取地址的接口**（全量搜 `*_ptr` 零命中），`#borrow`
+也确实只用于导入方向。但它有两条我漏掉的路：
 
-- 标准库（core）里全量搜不到任何取地址的接口（只有 `Bytes::unsafe_get` 这类
-  "通过 MoonBit 值访问"的 API）
-- `#borrow` 只用于**导入**方向（把 MoonBit 的值借给宿主函数），方向反了
-- 编译器不导出 `memory`，JS 没有入口把字节写进去
+**① `moon.pkg` 的 link 配置里有 `export-memory-name`** —— 默认**不导出**线性内存，
+写上它才会导出，JS 才有入口写字节：
 
-所以 **MoonBit 插件只支持数字槽位**（`theme` / `hot_score`）。
-`plugins/verify.mjs` 里把它写成**显式豁免**（不是静默跳过），
-而且如果哪天它能打分了，校验器会主动提醒「豁免该更新了」。
+```moonbit
+options(
+  link: {
+    "wasm": {
+      "export-memory-name": "memory",
+      "heap-start-address": 262144,     // 堆抬到 256KB，给缓冲区让路
+    },
+  },
+)
+```
+
+**② MoonBit 支持 inline wasm** —— 可以直接写 wasm 指令，于是"返回一个常量地址"
+和"从地址读一个字节"这两件标准库给不了的事都能表达：
+
+```moonbit
+extern "wasm" fn qa_buf_addr() -> Int =
+  #|(func (result i32) (i32.const 131072))
+
+extern "wasm" fn qa_load8(addr : Int) -> Int =
+  #|(func (param i32) (result i32) local.get 0 i32.load8_u)
+```
+
+两条合起来协议就成立了。缓冲区放在**堆起始地址之下**（`heap-start-address`
+抬到 256KB，缓冲区用 128KB~256KB）—— **这两个数字必须互相对得上**，改一个
+就要改另一个，否则会互相踩。
+
+> 📌 **教训**：判断"某个语言能不能做某件事"时，**别只查 API，也要查构建配置**。
+> 我因为漏看 `export-memory-name` 得出了"MoonBit 做不到"的错误结论。
 
 ---
 

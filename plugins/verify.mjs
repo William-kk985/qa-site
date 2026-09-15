@@ -56,15 +56,14 @@ const SEARCH_CASES = [
 ];
 
 /* 已知**不支持**字符串 ABI 的产物。
-   ⚠️ 故意写成显式名单而不是"null 就跳过"：
-      · 静默跳过会掩盖真正的回归（某个语言本来好好的、突然不提供了）
-      · 写成名单的话，哪天 MoonBit 支持了，下面"豁免已过期"那一段会提醒我们
-        （它开始能给出分数 → 说明该更新文档和这份名单了）
-   原因见 plugins/README.md 和 plugins/moon/example/example.mbt 的注释。 */
-const NO_STRING_ABI = {
-  moonbit: 'MoonBit 标准库没有暴露缓冲区地址的接口，编译器也不导出 memory，'
-         + 'JS 没法把字节写进它的线性内存',
-};
+   ⚠️ 现在这个名单是**空的** —— 8 种语言全部支持了。
+      这段机制保留着：万一以后加新语言、或者某个语言的实现退化了，
+      写在这里是"明确豁免"而不是"静默跳过"（静默跳过会掩盖真回归）；
+      而且如果名单里的东西突然能打分了，下面会主动提醒"豁免该更新了"。
+   —— MoonBit 曾经在这个名单里（我以为它拿不到裸指针），后来发现
+      moon.pkg 的 export-memory-name + inline wasm 两条路就能做到。
+      它被这段提醒抓出来的时候，说明这个机制是有效的。 */
+const NO_STRING_ABI = {};
 
 const problems = [];
 const skipped = [];

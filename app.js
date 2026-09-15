@@ -230,10 +230,11 @@ let themePlugin = null;    // 插件②：生成整站外观（CSS）
    这里的 searchPlugin 是已经**统一好的** (query, text) => number，上层不用管
    底下是哪种传输方式。null = 没插件或插件不支持。 */
 let searchPlugin = null;
-/* 顺带说清一个能力边界：MoonBit 目前做不到这个协议 —— 它的标准库没有任何
-   暴露缓冲区地址的接口，编译器也不导出 memory，所以 JS 没法把字节写进去。
-   （不是我们偷懒：core 库里全量搜不到 *_ptr，而 #borrow 只用于"导入"方向。）
-   MoonBit 插件因此只支持数字槽位。 */
+/* 八种语言现在**全都**支持这个协议了，包括 MoonBit。
+   MoonBit 那两份工作是在插件侧做的（moon.pkg 里配 export-memory-name 导出内存，
+   再用 inline wasm 拿缓冲区地址），宿主这边不用管 —— 它照样走下面这个绑定流程。
+   ⚠️ 教训留在这儿：我一度以为 MoonBit 做不到，因为它的标准库确实没有取地址的
+      接口 —— 但那是只查了 API、没查构建配置。详见 plugins/README.md。 */
 
 const THEME_SLOTS = [
   { i: 0, name: '主题色 色相',   lo: 0,   hi: 360,  dflt: 245 },

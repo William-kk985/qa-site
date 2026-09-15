@@ -41,18 +41,57 @@ pub fn hot_score(votes : Double, answers : Double, views : Double, age_days : Do
 }
 
 // ===========================================================================
-// ⚠️ 这里**没有** search_score（搜索相关度打分），不是漏了
+// ③ 搜索相关度打分：search_score(q_len, t_len) -> Double
 // ---------------------------------------------------------------------------
-// 那个能力要吃字符串，而 wasm 侧要把字符串送进去必须满足两条：
-//   ① 插件能给出一个可写缓冲区的**地址**（C/C++/Rust 用静态数组，
-//      Rust 靠 addr_of_mut!）
-//   ② 模块要**导出 memory**，JS 才能把字节写进去
+// 和 C / C++ / Rust 用同一套缓冲区协议（说明见 c/example.c 的长注释）：
+//   qa_buffer() 给出缓冲区地址，JS 把 query 和 text 的 UTF-8 字节写进去，
+//   再调 search_score(qLen, tLen)。
 //
-// MoonBit 目前两条都做不到：
-//   · 标准库（core）里全量搜不到任何取地址的接口，只有 Bytes::unsafe_get /
-//     unsafe_set 这类"通过 MoonBit 值访问"的 API，拿不到裸指针
-//   · #borrow 只用于**导入**方向（把 MoonBit 的值借给宿主函数），方向反了
-//   · 编译器不导出 memory（我们的产物导出里只有两个函数）
+// ⚠️ 我一开始以为 MoonBit 做不到这个 —— 因为标准库里确实**没有取地址的接口**
+//    （core 里全量搜 *_ptr 是零命中）。但那只查了运行时 API，漏了两条路：
+//      ① moon.pkg 的 link 配置里有 `export-memory-name`，写了才会导出内存
+//      ② MoonBit 支持 **inline wasm**：`extern "wasm" fn f() = #|(func ...)`
+//         可以直接写 wasm 指令，于是「返回一个常量地址」「从地址读一个字节」
+//         这两件事都能表达
+//    两条合起来，协议就成立了。教训：**别只查 API，也要查构建配置。**
 //
-// 所以 MoonBit 插件目前只支持数字槽位（theme / hot_score）。
-// 这是平台的现状，不是我们的实现取舍。
+// ⚠️ 缓冲区地址（下面 QA_BUF）必须和 moon.pkg 里的 heap-start-address 对上：
+//    缓冲区放在堆下面，堆从 256KB 开始，缓冲区占 128KB~256KB。
+//    改一个就要改另一个，不然会互相踩。
+// ===========================================================================
+const QA_BUF : Int = 131072          // 128KB —— 要和 moon.pkg 的 heap-start-address 配合
+const QA_BUF_SIZE : Int = 131072     // 128KB
+
+extern "wasm" fn qa_buf_addr() -> Int =
+  #|(func (result i32) (i32.const 131072))
+
+extern "wasm" fn qa_load8(addr : Int) -> Int =
+  #|(func (param i32) (result i32) local.get 0 i32.load8_u)
+
+fn qa_lower(c : Int) -> Int { if c >= 65 && c <= 90 { c + 32 } else { c } }
+
+#export_name("qa_buffer")
+pub fn qa_buffer() -> Int { qa_buf_addr() }
+
+#export_name("search_score")
+pub fn search_score(q_len : Int, t_len : Int) -> Double {
+  if q_len <= 0 { return 0.0 }
+  if q_len + t_len > QA_BUF_SIZE { return 0.0 }
+  let text_base = QA_BUF + q_len
+  let mut score = 0.0
+  let mut i = 0
+  while i < q_len {
+    let c = qa_lower(qa_load8(QA_BUF + i))
+    if c != 32 {
+      let mut n = 0.0
+      let mut j = 0
+      while j < t_len {
+        if qa_lower(qa_load8(text_base + j)) == c { n = n + 1.0 }
+        j = j + 1
+      }
+      score = score + n
+    }
+    i = i + 1
+  }
+  score / q_len.to_double()
+}

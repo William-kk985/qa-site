@@ -1,3 +1,16 @@
 // foreign_library = 这个包是给外部（浏览器 / 别的语言）用的库，
 // 里面的 #export_name 函数会被导出到 .wasm 的导出表里。
 pkgtype(kind: "foreign_library")
+
+// ⚠️ 下面这两个选项是「字符串 ABI」必需的，删了 search_score 就不工作了：
+//   · export-memory-name：**默认不导出线性内存**，不写这一行 JS 根本拿不到
+//     memory 句柄，一个字节都写不进来
+//   · heap-start-address：把 GC 堆抬到 256KB，给我们留出下面 128KB 当字符串缓冲区
+options(
+  link: {
+    "wasm": {
+      "export-memory-name": "memory",
+      "heap-start-address": 262144,
+    },
+  },
+)
