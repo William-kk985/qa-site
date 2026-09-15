@@ -161,6 +161,10 @@ let currentQuestion = null; // 当前正在看的问题（编辑时要从这里�
 
    ⚠️ 逃生通道：万一把界面改坏了，在网址后面加 ?reset=1（或 #reset-theme）即可还原。
       所以这个判断必须放在最前面，早于 applyTheme()。
+
+      ⚠️ 但**这一份只负责清 localStorage 里的外观设置**。如果用户把 app.js 本身
+         改坏了，这行代码根本不会执行 —— 所以"清掉本地覆盖 + 注销拦截器"那一半
+         放在 sw.js 里（用户改不到它），见 sw.js 的「逃生通道」注释。
    ============================================================================ */
 const THEME_KEY = 'qa_theme_v1';
 
@@ -185,6 +189,11 @@ const THEME_DEFAULTS = {
   pluginJs: '',            // 或者你自己上传的 .js（源码原文）—— 和 plugin 二选一
   pluginPy: '',            // 或者你自己上传的 .py（源码原文）
   pluginName: '',
+  /* 本地拦截器（Service Worker）开关。
+     ⚠️ 默认 false —— 装了它才会去 register。没有改 app.js 需求的人
+        不该被动多一层东西（哪怕我们的实现是"改过的才拦、其它一律透传"）。
+     放这儿是为了让「一键还原」能一并卸掉它。 */
+  sw: false,
 };
 const THEME_PRESETS = ['#4f46e5', '#0ea5e9', '#059669', '#d97706',
                        '#dc2626', '#db2777', '#7c3aed', '#475569'];
@@ -223,7 +232,16 @@ const THEME_SLOTS = [
   { i: 5, name: '正文字号',     lo: 12,  hi: 20,   dflt: 15  },
   { i: 6, name: '卡片内边距',    lo: 0,   hi: 40,   dflt: 15  },
   { i: 7, name: '列表间距',     lo: 0,   hi: 30,   dflt: 10  },
+  /* 第 9 个槽位：明暗。
+     用数字表达三态：≥0.5 = 深色，<0.5 = 浅色，**负数 = 不插手**（听外观面板的）。
+     dflt 故意给 -1 —— 这样"没打算管明暗"的插件（返回负数）不会把用户的
+     明暗设置顶掉。这也是唯一一个语义不是"数值大小"而是"阈值"的槽位。 */
+  { i: 8, name: '明暗（<0.5 浅色 / ≥0.5 深色）', lo: 0, hi: 1, dflt: -1 },
 ];
+
+/* 「明暗」那个槽位的编号。定义在这里而不是靠近用它的地方 ——
+   applyTheme() 在模块加载时就调用，文件后面的 const 那时还在 TDZ 里。 */
+const SLOT_SCHEME = 8;
 
 let theme = { ...THEME_DEFAULTS };
 
@@ -261,9 +279,13 @@ function applyTheme() {
   decl.push(`--maxw: ${theme.width}px;`);
   vars.textContent = ':root { ' + decl.join(' ') + ' }';
 
-  /* ---- 2) 明暗 / 密度用属性，不参与 CSS 优先级竞争 ---- */
-  if (theme.scheme === 'system') r.removeAttribute('data-theme');
-  else r.setAttribute('data-theme', theme.scheme);
+  /* ---- 2) 明暗 / 密度用属性，不参与 CSS 优先级竞争 ----
+     ⚠️ 插件可以覆盖明暗（槽位 8），所以这里先问一下插件。
+        优先级是「插件 > 外观面板」—— 因为插件是用户自己写的、更明确；
+        它返回负数就表示不插手，那就听外观面板的。 */
+  const scheme = pluginThemeScheme() || theme.scheme;
+  if (scheme === 'system') r.removeAttribute('data-theme');
+  else r.setAttribute('data-theme', scheme);
   r.setAttribute('data-density', theme.density);
 
   /* ---- 3) 自定义 CSS：注入另一个 <style>，必须排在 vars 后面 ---- */
@@ -385,6 +407,124 @@ function closeTheme() { $('#theme-mask').classList.add('hidden'); }
      · styles.css          → ✅ 可编辑，改完立刻生效（其实就是写进自定义 CSS）
      · index.html / app.js → 👀 只能看（原因写在下面的 note 里）
    -------------------------------------------------------------------- */
+/* ============================================================================
+   本地拦截器（Service Worker）—— 让 index.html / app.js 真的可以改
+   ----------------------------------------------------------------------------
+   为什么非它不可：这两个文件是**页面加载时就要跑**的东西。在页面上改没有意义
+   （改的时候页面早跑完了），必须有个东西拦在**请求发出那一刻**把响应换掉。
+   sw.js 就是干这个的。
+
+   ⚠️ 关于「站长更新了站点，用户能不能拿到」——这是读者最该关心的问题：
+      · sw.js **不缓存任何网络响应**，透传就是直接 fetch。
+      · 只有用户**自己声明改过**的那几个文件会被顶替。
+      · 站长推一次大更新：所有人（包括装了拦截器的人），除了他自己改过的那
+        一个文件之外，全都立刻拿到新版。
+      · 而且拦截器**默认不装**，绝大多数用户根本不会走到这条路。
+
+   版本过期的处理：保存改动时记下"当时的线上版"的哈希。以后每次打开站点，
+   拿线上原版重新算一遍，对不上就说明站长更新过 —— 在「看源码」里标红，
+   告诉他"你改的是旧版本，可能不兼容"，并给一键还原回新版。
+   ============================================================================ */
+const SW_DB = 'qa-sw';              // 和 sw.js 里那两个常量必须一致
+const SW_STORE = 'overrides';
+const SW_RAW = 'qa-raw';            // 带这个参数就绕过拦截器，用来取线上原版
+let swStale = [];                   // 基线对不上线上的文件（站点更新过了）
+
+const swSupported = () =>
+  'serviceWorker' in navigator && location.protocol !== 'file:';
+
+/* ⚠️ 这段和 sw.js 里那份是故意重复的：Service Worker 必须自包含，
+   而页面和 SW 又没法方便地共享模块。宁可重复这 20 行。 */
+function swIdb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SW_DB, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(SW_STORE)) {
+        req.result.createObjectStore(SW_STORE, { keyPath: 'key' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function swTx(mode, fn) {
+  return swIdb().then(db => new Promise((resolve, reject) => {
+    const store = db.transaction(SW_STORE, mode).objectStore(SW_STORE);
+    const req = fn(store);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  })).catch(() => null);            // 存储不可用（隐私模式等）就当没有，别炸
+}
+
+const swGet = key => swTx('readonly', s => s.get(key));
+const swPut = rec => swTx('readwrite', s => s.put(rec));
+const swDel = key => swTx('readwrite', s => s.delete(key));
+const swAll = () => swTx('readonly', s => s.getAll());
+const swClearAll = () => swTx('readwrite', s => s.clear());
+
+async function sha256(text) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (_) {
+    return '';                       // 没有 crypto.subtle（非安全上下文）就不做比对
+  }
+}
+
+/* 取**线上原版**：加 qa-raw 让 sw.js 放行。
+   不加的话，用户改了 app.js 之后就再也拿不到原版来比对了。 */
+async function fetchRaw(key) {
+  try {
+    const res = await fetch(key + '?' + SW_RAW + '=' + Date.now(), { cache: 'no-store' });
+    return res.ok ? await res.text() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const swOn = () => !!theme.sw && swSupported();
+
+async function swInstall() {
+  if (!swSupported()) throw new Error('这个浏览器不支持 Service Worker，或者页面不是 https');
+  const reg = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;      // 等它真的接管，别让用户接着就刷新
+  return reg;
+}
+
+async function swUninstall() {
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) {
+      if ((r.scope || '').includes(location.pathname.replace(/[^/]*$/, ''))) await r.unregister();
+    }
+  } catch (_) { /* 卸不掉也要继续往下清 */ }
+  await swClearAll();
+  swStale = [];
+}
+
+/* 保存一份本地改动。baseHash 记的是**改动时线上版**的哈希，用于日后判断过期。 */
+async function swSaveOverride(key, text) {
+  const raw = await fetchRaw(key);
+  const baseHash = raw == null ? '' : await sha256(raw);
+  await swPut({ key, text, baseHash, savedAt: Date.now() });
+  swStale = swStale.filter(k => k !== key);
+}
+
+/* 每次打开站点时对一遍：线上版变了没有？变了就说明站长更新过。 */
+async function swCheckStale() {
+  if (!swOn()) { swStale = []; return; }
+  const list = (await swAll()) || [];
+  const out = [];
+  for (const o of list) {
+    if (!o || !o.key || !o.baseHash) continue;
+    const raw = await fetchRaw(o.key);
+    if (raw == null) continue;
+    if (await sha256(raw) !== o.baseHash) out.push(o.key);
+  }
+  swStale = out;
+}
+
 const SRC_FILES = [
   {
     key: 'styles.css',
@@ -394,16 +534,25 @@ const SRC_FILES = [
   },
   {
     key: 'index.html',
-    editable: false,
-    note: '页面骨架。👀 只能看：顶栏和各个弹窗是它渲染的，但问题列表 / 详情页这些主体'
-        + '是 app.js 在运行时生成的 —— 直接改这里会被下一次渲染冲掉。'
-        + '想动主体结构，请用 styles.css 调样式，或者去 GitHub 提 PR。',
+    /* needsSw = 只有装了本地拦截器才能改。
+       为什么：这个文件是页面加载时就要解析的，改它必须拦在请求那一刻，
+       光在页面上改没有意义（页面早解析完了）。 */
+    needsSw: true,
+    note: '页面骨架（顶栏、各个弹窗的标签）。'
+        + '问题列表 / 详情页这些主体是 app.js 运行时生成的，改这里不会影响它们。',
   },
   {
     key: 'app.js',
-    editable: false,
-    note: '全部逻辑。👀 只能看：这就是你正在用的这个程序，替换它等于自毁。'
-        + '想加东西请用「外观」页签里的「自定义 JS」—— 那是追加的，不替换原程序。',
+    needsSw: true,
+    note: '全部逻辑。⚠️ 这里就是**你正在跑的这个程序** —— 改坏了页面会直接打不开。'
+        + '好在这只影响你自己：改坏了用地址栏加 ?reset=1 就能救回来。'
+        + '想追加行为而不替换原程序，「外观」页签里的「自定义 JS」是更稳的选择。',
+  },
+  {
+    key: 'config.js',
+    needsSw: true,
+    note: '后端配置（Supabase 地址和发布密钥）。想让它连到**你自己的**数据库时改这里 —— '
+        + '改完刷新，整个站点就读写你的库了。',
   },
 ];
 
@@ -438,39 +587,101 @@ async function loadSrc(key) {
   return srcCache[key];
 }
 
+/* 本地拦截器那一块 UI：安装 / 卸载 / 过期警告 / 还原。
+   单独抽出来是因为它在三个文件之间都要显示，而且状态比较多。 */
+async function renderSwBox(f, canEdit) {
+  const box = $('#src-sw-box');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  const ov = await swGet(f.key);
+  const stale = swStale.includes(f.key);
+
+  if (!f.needsSw) {                    // styles.css 不需要拦截器
+    box.innerHTML = `<span class="faint">styles.css 不用拦截器，本来就能改。</span>`;
+    return;
+  }
+
+  const btns = [];
+  if (swOn()) {
+    btns.push(`<button type="button" class="btn btn-soft btn-sm" data-action="src-sw-off">卸载拦截器</button>`);
+    if (ov) btns.push(`<button type="button" class="btn btn-reset btn-sm" data-action="src-revert">还原成线上原版</button>`);
+  } else {
+    btns.push(`<button type="button" class="btn btn-primary btn-sm" data-action="src-sw-on">安装本地拦截器，允许改这个文件</button>`);
+  }
+
+  let lead;
+  if (!swOn()) {
+    lead = `<b>${esc(f.key)} 现在是只读的。</b>它是页面加载时就要跑的程序，`
+      + `<b>必须有东西拦在请求那一刻</b>才能改 —— 那就是「本地拦截器」。`
+      + `装了之后你能改这三个文件（含 app.js），<b>只对你自己生效</b>。`
+      + `<br><span class="faint">它是 opt-in 的：不点这个按钮就永远不会装。`
+      + `而且它<b>不缓存任何东西</b> —— 你没法过的文件照样走网络，站长更新照常生效。</span>`;
+  } else if (stale) {
+    lead = `<b class="danger-text">⚠️ 站点已经更新，你改的是旧版本。</b>`
+      + `你保存这份改动时，线上的 <code>${esc(f.key)}</code> 和现在<b>不是同一份</b>了。`
+      + `继续用可能出错（比如新版本改了页面结构，你那份老逻辑就对不上了）。`
+      + `<br>建议：<b>还原成线上原版</b>，再重新改一遍。`;
+  } else if (ov) {
+    lead = `✅ <b>正在用你本地改过的版本</b>（保存于 `
+      + `${new Date(ov.savedAt || Date.now()).toLocaleString()}，${ov.text.length} 字符）。`
+      + `<span class="faint">刷新后生效。只影响你自己。</span>`;
+  } else {
+    lead = `拦截器已装好。<b>你现在可以直接改 ${esc(f.key)} 了</b>，`
+      + `保存后刷新页面就会用你自己那份。<span class="faint">只影响你自己。</span>`;
+  }
+
+  box.innerHTML = `<div class="sw-lead">${lead}</div><div class="src-actions">${btns.join('')}</div>`;
+}
+
 async function renderSrc() {
   const box = $('#src-tabs');
   if (!box) return;
 
-  box.innerHTML = SRC_FILES.map(f =>
-    `<button type="button" class="tab ${f.key === srcCurrent ? 'is-active' : ''}"
-             data-action="src-tab" data-key="${f.key}">${f.key}</button>`).join('');
+  /* 先对一遍基线（只有装了拦截器才有意义），过期了就标红 */
+  await swCheckStale();
+
+  box.innerHTML = SRC_FILES.map(f => {
+    const bad = swStale.includes(f.key);
+    return `<button type="button" class="tab ${f.key === srcCurrent ? 'is-active' : ''}"
+             data-action="src-tab" data-key="${f.key}">${f.key}${bad ? ' ⚠️' : ''}</button>`;
+  }).join('');
 
   const f = SRC_FILES.find(x => x.key === srcCurrent) || SRC_FILES[0];
   $('#src-note').textContent = f.note;
   $('#src-status').textContent = '';
 
+  const canEdit = !!f.editable || (!!f.needsSw && swOn());
+  await renderSwBox(f, canEdit);
+
   const text = await loadSrc(f.key);
   const ta = $('#src-editor');
   const view = $('#src-view');
 
-  if (f.editable) {
+  if (canEdit) {
     ta.classList.remove('hidden');
     view.classList.add('hidden');
 
-    // 显示「线上源码 + 你自己加的部分」：
-    //   · 没改过 → 只显示线上源码
-    //   · 改过（整份源码级）→ 显示你那份
-    //   · 只加了一小段覆盖 → 源码在下、你的改动在最后，带一条醒目分隔
-    const mine = (theme.css || '').trim();
-    if (!mine) {
-      ta.value = text;
-    } else if (mine.length > text.length * 0.5) {
-      ta.value = mine;
+    if (f.editable) {
+      // styles.css：显示「线上源码 + 你自己加的部分」
+      //   · 没改过 → 只显示线上源码
+      //   · 改过（整份源码级）→ 显示你那份
+      //   · 只加了一小段覆盖 → 源码在下、你的改动在最后，带一条醒目分隔
+      const mine = (theme.css || '').trim();
+      if (!mine) {
+        ta.value = text;
+      } else if (mine.length > text.length * 0.5) {
+        ta.value = mine;
+      } else {
+        ta.value = text
+          + '\n\n/* ========== 下面是你自己加的部分（在线源码的基础上） ========== */\n'
+          + mine;
+      }
     } else {
-      ta.value = text
-        + '\n\n/* ========== 下面是你自己加的部分（在线源码的基础上） ========== */\n'
-        + mine;
+      /* index.html / app.js：编辑框里显示**你实际在跑的那份**。
+         装了拦截器时 loadSrc 拿到的就是本地覆盖版（sw.js 顶替过了），
+         所以这里不用额外处理 —— 编辑器里是什么，浏览器跑的就是什么。 */
+      ta.value = text;
     }
   } else {
     ta.classList.add('hidden');
@@ -1305,9 +1516,22 @@ const pluginBytes = () => {
      · 越界的值会被夹到合法范围，防止把界面搞烂
    ============================================================================ */
 /* 把 wasm 的数字算成一组 CSS 变量；没插件时返回 null */
+/* 插件对「明暗」的覆盖（槽位 8）。null = 插件不插手 → 听外观面板的设置。
+   ⚠️ SLOT_SCHEME 那个常量定义在文件上方 THEME_SLOTS 旁边，**不能挪到这里**：
+      applyTheme() 在模块加载时就跑，那时文件后面的 const 还在 TDZ 里。
+      这个坑在本文件里踩过两次（renderList 的 empty、applyTheme 的 themePlugin）。 */
+function pluginThemeScheme() {
+  if (!themePlugin) return null;
+  let x = NaN;
+  try { x = Number(themePlugin(SLOT_SCHEME)); } catch (_) { return null; }
+  if (!Number.isFinite(x) || x < 0) return null;      // 负数 = 不插手
+  return x >= 0.5 ? 'dark' : 'light';
+}
+
+/* 插件对「明暗」的覆盖，单独抽出来是因为它不走 CSS 变量那条路 ——
+   明暗是 html 上的 data-theme 属性，由 applyTheme 直接设置。 */
 function wasmThemeToCss() {
   if (!themePlugin) return null;
-
   const v = THEME_SLOTS.map(s => {
     let x = NaN;
     try { x = Number(themePlugin(s.i)); } catch (_) { /* 报错就当中性 */ }
@@ -2041,13 +2265,62 @@ document.addEventListener('click', async e => {
         break;
 
       case 'src-load': {
-        if (!confirm('把编辑框恢复成线上原版的 styles.css？你自己改过的内容会被覆盖。')) return;
-        const online = await loadSrc('styles.css');
+        /* 「载入线上原版」要按当前文件走 —— 原来写死了 styles.css，
+           改 app.js 的时候点它会莫名其妙地把 CSS 塞进编辑框。 */
+        const f = SRC_FILES.find(x => x.key === srcCurrent) || SRC_FILES[0];
+        if (!confirm(`把编辑框恢复成线上原版的 ${f.key}？你自己改过的内容会被覆盖。`)) return;
+        const online = await fetchRaw(f.key) ?? await loadSrc(f.key);
+        srcCache[f.key] = online;
         $('#src-editor').value = online;
-        theme.css = online;   // 让"看到的就是生效的"
-        applyTheme();
+        if (f.editable) {
+          theme.css = online;         // 让"看到的就是生效的"
+          applyTheme();
+          saveTheme();
+        } else {
+          await swSaveOverride(f.key, online);
+        }
+        $('#src-status').textContent = '已载入线上原版';
+        toast('已载入线上原版' + (f.needsSw ? '，刷新后生效' : ''));
+        break;
+      }
+
+      case 'src-sw-on': {
+        if (!swSupported()) {
+          toast('这个浏览器不支持本地拦截器（Service Worker）/ 或者页面不是 https');
+          return;
+        }
+        try {
+          await swInstall();
+          theme.sw = true;
+          saveTheme();
+          await renderSrc();
+          toast('拦截器已装好 —— 现在这几个文件都能改了（只对你自己生效）');
+        } catch (e) {
+          toast('装不上：' + e.message);
+        }
+        break;
+      }
+
+      case 'src-sw-off': {
+        if (!confirm('卸载本地拦截器？你本地改过的 app.js / index.html 会一并清掉，'
+          + '页面回到线上原版。')) return;
+        await swUninstall();
+        theme.sw = false;
         saveTheme();
-        toast('已载入线上原版，可以开始改了');
+        srcCache = {};                 // 缓存里可能是覆盖版，清掉重新取
+        await renderSrc();
+        toast('拦截器已卸载，回到线上原版（刷新后彻底生效）');
+        break;
+      }
+
+      case 'src-revert': {
+        const f = SRC_FILES.find(x => x.key === srcCurrent) || SRC_FILES[0];
+        if (!confirm(`把 ${f.key} 还原成线上原版？你本地那份会被丢掉。`)) return;
+        await swDel(f.key);
+        swStale = swStale.filter(k => k !== f.key);
+        srcCache = {};
+        await renderSrc();
+        toast(`${f.key} 已还原成线上原版（刷新后生效）`);
         break;
       }
 
@@ -2423,7 +2696,21 @@ document.addEventListener('input', e => {
   else if (id === 'theme-css') { theme.css = e.target.value; updateThemeConflict(); }
   else if (id === 'theme-js') theme.js = e.target.value;
   else if (id === 'src-editor') {
-    // 源码编辑器里有近千行，每敲一个字都重解析会卡 —— 防抖 400ms
+    /* ⚠️ 编辑框里显示的是哪个文件，决定这次输入该存到哪 ——
+       不能一律当成 styles.css，不然改 app.js 会污染外观设置。 */
+    const f = SRC_FILES.find(x => x.key === srcCurrent);
+    if (f && f.needsSw) {
+      // app.js / index.html：必须走「本地覆盖」，光存本地没用（要拦请求）
+      // 防抖 800ms，且**不刷新页面** —— 刷新了会把自己的编辑冲掉
+      clearTimeout(srcApplyTimer);
+      srcApplyTimer = setTimeout(async () => {
+        await swSaveOverride(srcCurrent, e.target.value);
+        const st = $('#src-status');
+        if (st) st.textContent = '已保存到本地覆盖（刷新后生效）';
+      }, 800);
+      return;
+    }
+    // styles.css：源码编辑器里有近千行，每敲一个字都重解析会卡 —— 防抖 400ms
     theme.css = e.target.value;
     updateThemeConflict();
     clearTimeout(srcApplyTimer);

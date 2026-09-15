@@ -878,6 +878,28 @@ h1, h2, h3, p { margin: 0; }
   line-height: 1.7;
   color: var(--text-dim);
 }
+
+/* ---------------------- 本地拦截器（Service Worker）提示块 ----------------------
+   这块是给「看源码」用的：没装拦截器时劝你装、装了显示状态、站点更新了就报警。
+   三种状态视觉上要能一眼区分，所以底色跟着变。 */
+.sw-box {
+  margin: 10px 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.sw-box .sw-lead b { color: var(--text); }
+/* 站点更新过、本地基线过期 —— 这个必须显眼，用户可能正跑着一份对不上的代码 */
+.sw-box:has(.danger-text) {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+.danger-text { color: var(--danger-text); }
+.sw-box .src-actions { margin-top: 9px; }
 #src-editor, .src-view {
   width: 100%;
   min-height: 320px;

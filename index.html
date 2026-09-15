@@ -357,11 +357,16 @@
     <div id="theme-pane-source" class="hidden">
       <p class="hint" style="margin-bottom:10px">
         下面就是<b>本站正在线上运行的源代码</b>，可以直接读、复制。
-        <b>styles.css 还能直接改，改完立刻生效</b> —— 整站的外观、间距、布局都在这个文件里。
+        <b>styles.css 能直接改，改完立刻生效</b>；想连 <code>app.js</code> /
+        <code>index.html</code> 一起改，需要装一个「本地拦截器」（见下）。
       </p>
 
       <div class="tabs" id="src-tabs"></div>
       <div class="src-note" id="src-note"></div>
+
+      <!-- 本地拦截器（Service Worker）：默认不装，用户主动点才装 -->
+      <div class="sw-box hidden" id="src-sw-box"></div>
+
       <div class="src-pickers hidden" id="src-pickers"></div>
 
       <textarea id="src-editor" spellcheck="false"></textarea>
@@ -411,7 +416,7 @@
       </div>
 
       <details class="theme-advanced">
-        <summary>theme 的 8 个槽位分别是啥</summary>
+        <summary>theme 的 9 个槽位分别是啥</summary>
         <div id="plugin-slots" style="margin-top:10px"></div>
       </details>
 

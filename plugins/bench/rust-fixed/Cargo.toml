@@ -1,0 +1,13 @@
+[package]
+name = "medium-fixed"
+version = "0.1.0"
+edition = "2021"
+[lib]
+crate-type = ["cdylib"]
+[profile.release]
+# 体积优先的极限配置 —— 两个 Rust 变体**逐字相同**，体积差只能来自
+# 用不用堆，不能来自构建参数（这是本基准可信的前提）。
+opt-level = "z"   # 要体积不要速度
+lto = true        # 跨 crate 内联，把用不到的分支整段删掉
+strip = true      # 去掉 name/producers 元数据段（和 C 那边的 --strip-all 对应）
+panic = "abort"   # 不要 unwind 表；插件里 panic 本来就无从传播

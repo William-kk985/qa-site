@@ -31,6 +31,9 @@ const SLOTS = [
   { i: 5, lo: 12,  hi: 20,   dflt: 15 },
   { i: 6, lo: 0,   hi: 40,   dflt: 15 },
   { i: 7, lo: 0,   hi: 30,   dflt: 10 },
+  /* 明暗：dflt = -1 表示"不插手"。示例插件全都返回 -1（它们不打算管明暗），
+     所以下面那个范围检查（只对 >= 0 的值生效）会放它们过去 —— 这是对的。 */
+  { i: 8, lo: 0,   hi: 1,    dflt: -1 },
 ];
 
 /* 拿三组输入试试 hot_score：新的、零的、30 天前的 */
@@ -57,7 +60,9 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 out = {
   "exports": [n for n in ("theme", "hot_score") if callable(getattr(mod, n, None))],
-  "slots": [mod.theme(i) for i in range(8)],
+  # 长度跟着 SLOTS 走，别写死 —— 写死的话加了新槽位之后 Python 会取到 undefined，
+  # 看起来像"插件不一致"，其实是取值的锅。
+  "slots": [mod.theme(i) for i in range(9)],
   "hots": [mod.hot_score(*a) for a in ([1,2,100,3], [0,0,0,0], [10,5,1000,30])],
 }
 print(json.dumps(out))
@@ -200,26 +205,31 @@ const labels = [...results.keys()];
 if (labels.length > 1) {
   const base = results.get(labels[0]);
   console.log(`\n  以 ${labels[0]} 为基准，比对另外 ${labels.length - 1} 个：`);
-  let allSame = true;
+  /* ⚠️ same 必须每个 label 单独算。写在循环外的话，一旦有一个不一致，
+     后面每个都会跟着报 ❌ —— 明明只有一个是坏的，看起来像全坏了。 */
   for (const label of labels.slice(1)) {
     const cur = results.get(label);
+    let same = true;
     for (let i = 0; i < SLOTS.length; i++) {
       if (!Object.is(cur.slots[i], base.slots[i])) {
         problems.push(`不一致：${label} 的 theme(${i}) = ${cur.slots[i]}，`
           + `而 ${labels[0]} 是 ${base.slots[i]}`);
-        allSame = false;
+        same = false;
       }
     }
     for (let i = 0; i < HOT_CASES.length; i++) {
       if (!Object.is(cur.hots[i], base.hots[i])) {
         problems.push(`不一致：${label} 的 hot_score(${HOT_CASES[i].args.join(',')}) = ${cur.hots[i]}，`
           + `而 ${labels[0]} 是 ${base.hots[i]}`);
-        allSame = false;
+        same = false;
       }
     }
-    console.log(`    ${allSame ? '✅' : '❌'} ${label} 与基准逐位相同`);
+    console.log(`    ${same ? '✅' : '❌'} ${label} 与基准逐位相同`);
   }
-  if (allSame) console.log('\n  ✅ 所有语言编译出来的插件，输出**逐位完全相同**');
+  /* problems 里此刻如果还没有"不一致"类的条目，就说明全都对得上 */
+  if (!problems.some(p => p.startsWith('不一致'))) {
+    console.log('\n  ✅ 所有语言编译出来的插件，输出**逐位完全相同**');
+  }
 }
 
 /* ------------------------------------------------------------------ 结论 */

@@ -12,6 +12,11 @@ import { connect, check, summary, checkNoJsErrors, waitFor, sleep, ROOT } from '
 const WASM = path.join(ROOT, 'plugins', 'prebuilt', 'moonbit.wasm');
 
 const s = await connect();
+/* ⚠️ 必须自己设视口。这条用例要验"页面宽度变成 1240px"，视口比 1240 窄的话
+   .app 会被视口卡住，断言必然失败 —— 而且失败原因看起来像功能坏了。
+   之前踩过：继承了上一个测试残留的 780px 视口。 */
+await s.send('Emulation.setDeviceMetricsOverride',
+  { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
 await s.boot();
 await s.waitData();
 await waitFor(async () => await s.ev(`!!document.querySelector('.qcard')`), 20000);
@@ -42,7 +47,7 @@ await s.ev(`document.querySelector('.topbar [data-action="theme"]').click()`);
 await waitFor(async () => s.shown('#theme-mask'));
 await s.ev(`document.querySelector('[data-action="theme-tab"][data-tab="plugin"]').click()`);
 await waitFor(async () => s.shown('#theme-pane-plugin'));
-check('插件页签里有槽位表', (await s.count('.slot-table tbody tr')) === 8,
+check('插件页签里有槽位表（9 行：8 个外观 + 1 个明暗）', (await s.count('.slot-table tbody tr')) === 9,
   (await s.count('.slot-table tbody tr')) + ' 行');
 
 await s.uploadFile(WASM);

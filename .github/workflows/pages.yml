@@ -36,7 +36,11 @@ jobs:
       - name: 挑出要发布的文件
         run: |
           mkdir -p _site
-          cp -r index.html styles.css app.js config.js vendor plugins .nojekyll _site/
+          # ⚠️ 加新文件时记得也加到这里 —— 漏了的话本地一切正常、线上 404。
+          #    （之前 plugins/ 就漏过一次，WASM 插件静默部署不上去。）
+          #    sw.js 必须在**根目录**：Service Worker 的作用域就是它自己所在的
+          #    目录，放进子目录就拦不到 index.html 了。
+          cp -r index.html styles.css app.js config.js sw.js vendor plugins .nojekyll _site/
           echo "将要发布的文件："
           ls -la _site
 

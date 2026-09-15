@@ -180,7 +180,9 @@ await s.ev(`document.querySelector('[data-action="theme-tab"][data-tab="source"]
 await waitFor(async () => s.shown('#theme-pane-source'), 10000);
 await waitFor(async () => (await s.ev(`(document.querySelector('#src-editor')||{}).value || ''`)).length > 500, 15000);
 check('切到了「看源码」页签', await s.shown('#theme-pane-source'));
-check('列了三个源文件', (await s.count('#src-tabs .tab')) === 3);
+/* 4 个源文件：styles.css / index.html / app.js / config.js
+   （config.js 是后加的：想接自己的数据库时改它） */
+check('列了四个源文件', (await s.count('#src-tabs .tab')) === 4);
 check('默认打开 styles.css 且是可编辑的', await s.shown('#src-editor'));
 
 const cssLen = (await s.ev(`document.querySelector('#src-editor').value`)).length;
@@ -218,8 +220,10 @@ check('app.js 是只读的（显示 pre，没有编辑框）',
   (await s.shown('#src-view')) && !(await s.shown('#src-editor')));
 check('app.js 内容是真源码',
   (await s.ev(`document.querySelector('#src-view').textContent`)).includes('createClient'));
-check('app.js 的说明解释了为什么不能改',
-  (await s.txt('#src-note')).includes('只能看'));
+/* app.js 现在**可以**改了（装了本地拦截器之后），说明文案随之改成
+   "能改但危险 + 告诉你怎么救"。别再去断言旧的"只能看"。 */
+check('app.js 的说明说清了风险和解法',
+  (await s.txt('#src-note')).includes('打不开') && (await s.txt('#src-note')).includes('?reset=1'));
 check('切到 app.js 后小抄自动隐藏', !(await s.shown('#src-pickers')));
 
 await s.ev(`document.querySelector('[data-action="src-tab"][data-key="index.html"]').click()`);

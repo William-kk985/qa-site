@@ -14,3 +14,11 @@ rescript/.rescript*
 # build.sh 的临时日志
 prebuilt/.*.log
 __pycache__/
+
+# 体积基准（bench-size.sh）的中间产物和实验产物。
+# ⚠️ 这个基准和 prebuilt/ 不一样：它的 .wasm 只是**实验读数**，不需要提交、
+#    也不给人下载 —— 谁想看，跑一遍 bench-size.sh 就能原样复现。
+bench/rust-fixed/target/
+bench/rust-vec/target/
+bench/moon/_build/
+bench/.out/
