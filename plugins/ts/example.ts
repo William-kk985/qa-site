@@ -54,3 +54,27 @@ export function hot_score(votes: number, answers: number, views: number, ageDays
   // 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
   return base / (1 + ageDays / 30);
 }
+
+/* ---------------------------------------------------------------------------
+   ③ 搜索相关度打分：search_score(query, text) -> number
+   和 js/example.js 里那份逻辑完全相同，只是加了类型。
+   算分前先 encode 成 UTF-8 字节，这样和 wasm 侧（C/C++/Rust 的
+   qa_buffer 协议）逐位一致 —— 直接按 JS 字符遍历的话中文会对不上。
+   --------------------------------------------------------------------------- */
+const QA_ENC = new TextEncoder();
+const qaLower = (b: number): number => (b >= 65 && b <= 90) ? b + 32 : b;
+
+export function search_score(query: string, text: string): number {
+  const q = QA_ENC.encode(query);
+  const t = QA_ENC.encode(text);
+  if (q.length === 0) return 0;
+  let score = 0;
+  for (let i = 0; i < q.length; i++) {
+    const c = qaLower(q[i]);
+    if (c === 32) continue;
+    let n = 0;
+    for (let j = 0; j < t.length; j++) if (qaLower(t[j]) === c) n++;
+    score += n;
+  }
+  return score / q.length;
+}

@@ -29,8 +29,45 @@ function hot_score(votes, answers, views, ageDays) {
   return base / (1.0 + ageDays / 30.0);
 }
 
+let qaEncoder = new TextEncoder();
+
+function qaLower(b) {
+  if (b >= 65 && b <= 90) {
+    return b + 32 | 0;
+  } else {
+    return b;
+  }
+}
+
+function search_score(query, text) {
+  let q = qaEncoder.encode(query);
+  let t = qaEncoder.encode(text);
+  let qLen = q.length;
+  if (qLen === 0) {
+    return 0.0;
+  }
+  let tLen = t.length;
+  let score = 0.0;
+  for (let i = 0; i < qLen; ++i) {
+    let c = qaLower(q[i]);
+    if (c !== 32) {
+      let n = 0.0;
+      for (let j = 0; j < tLen; ++j) {
+        if (qaLower(t[j]) === c) {
+          n = n + 1.0;
+        }
+      }
+      score = score + n;
+    }
+  }
+  return score / qLen;
+}
+
 export {
   theme,
   hot_score,
+  qaEncoder,
+  qaLower,
+  search_score,
 }
-/* No side effect */
+/* qaEncoder Not a pure module */

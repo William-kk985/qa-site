@@ -75,6 +75,7 @@ if want c; then
     if "$CLANG" --target=wasm32 -nostdlib -Oz $(ld_args) \
          -Wl,--no-entry -Wl,--strip-all \
          -Wl,--export=theme -Wl,--export=hot_score \
+         -Wl,--export=search_score -Wl,--export=qa_buffer \
          -o "$OUT/c.wasm" "$HERE/c/example.c" 2>"$OUT/.c.log"; then
       BUILT+=("c")
     else
@@ -92,6 +93,7 @@ if want cpp; then
     if "$CLANGXX" --target=wasm32 -nostdlib -Oz $(ld_args) \
          -Wl,--no-entry -Wl,--strip-all \
          -Wl,--export=theme -Wl,--export=hot_score \
+         -Wl,--export=search_score -Wl,--export=qa_buffer \
          -o "$OUT/cpp.wasm" "$HERE/cpp/example.cpp" 2>"$OUT/.cpp.log"; then
       BUILT+=("cpp")
     else

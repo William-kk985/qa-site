@@ -44,3 +44,52 @@ pub extern "C" fn hot_score(votes: f64, answers: f64, views: f64, age_days: f64)
     // 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
     base / (1.0 + age_days / 30.0)
 }
+
+// ===========================================================================
+// ③ 搜索相关度打分：search_score(qLen, tLen) -> f64
+//    协议说明见 c/example.c 的注释（三个 wasm 语言用的是同一套）。
+//    这边多一个 Rust 特有的坑：静态可变缓冲区要拿指针，得用 addr_of_mut!，
+//    不能写 `&mut QA_BUF` —— 那会创建一个对 static mut 的引用，
+//    新版 Rust 会直接报错（static_mut_refs）。
+// ===========================================================================
+const QA_BUF_SIZE: usize = 65536;
+static mut QA_BUF: [u8; QA_BUF_SIZE] = [0; QA_BUF_SIZE];
+
+#[no_mangle]
+pub extern "C" fn qa_buffer() -> *mut u8 {
+    // SAFETY: wasm 是单线程的，插件只被 JS 同步调用，不存在并发访问；
+    //         返回裸指针给宿主写数据是这套协议的全部目的。
+    unsafe { core::ptr::addr_of_mut!(QA_BUF) as *mut u8 }
+}
+
+#[inline]
+fn qa_lower(c: u8) -> u8 {
+    if c.is_ascii_uppercase() { c + 32 } else { c }
+}
+
+#[no_mangle]
+pub extern "C" fn search_score(q_len: i32, t_len: i32) -> f64 {
+    if q_len <= 0 { return 0.0; }
+    if (q_len + t_len) as usize > QA_BUF_SIZE { return f64::NAN; }
+
+    /* ⚠️ 这里**刻意用裸指针**，而不是 `&buf[..n]` 那样切片。
+       切片下标会做越界检查，一越界就 panic —— 而 panic 会把整套格式化机制
+       链进来，产物从几百字节直接涨到 ~15KB（实测 274 B → 14977 B）。
+       这正好印证了 plugins/BENCH.md 里那条结论：**Rust 的体积拐点在"要不要
+       链运行时"**，而"用不用堆"只是其中一种触发方式，panic 是另一种。
+
+       SAFETY: 上面已经确认 q_len + t_len 不越界；
+       wasm 是单线程、插件只被 JS 同步调用，指针在整个循环里有效。 */
+    let base = unsafe { core::ptr::addr_of!(QA_BUF) as *const u8 };
+    let mut score = 0.0f64;
+    for i in 0..q_len {
+        let c = qa_lower(unsafe { *base.offset(i as isize) });
+        if c == b' ' { continue; }
+        let mut n = 0f64;
+        for j in 0..t_len {
+            if qa_lower(unsafe { *base.offset((q_len + j) as isize) }) == c { n += 1.0; }
+        }
+        score += n;
+    }
+    score / q_len as f64
+}

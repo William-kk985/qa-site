@@ -45,3 +45,36 @@ double hot_score(double votes, double answers, double views, double age_days) {
   // 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
   return base / (1.0 + age_days / 30.0);
 }
+
+// ===========================================================================
+// ③ 搜索相关度打分：search_score(qLen, tLen) -> double
+//    和 C 那版逐字一样（协议说明见 c/example.c 的注释）。
+//    C++ 这边多一个理由要 extern "C"：否则 name mangling 会让导出名对不上。
+// ===========================================================================
+namespace {
+constexpr int kQaBufSize = 65536;
+unsigned char g_qa_buf[kQaBufSize];
+
+inline int qaLower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+}
+
+extern "C" __attribute__((export_name("qa_buffer")))
+unsigned char *qa_buffer(void) { return g_qa_buf; }
+
+extern "C" __attribute__((export_name("search_score")))
+double search_score(int q_len, int t_len) {
+  if (q_len <= 0) return 0.0;
+  if (q_len + t_len > kQaBufSize) return 0.0 / 0.0;
+  const int base = q_len;
+  double score = 0.0;
+  for (int i = 0; i < q_len; i++) {
+    const int c = qaLower(g_qa_buf[i]);
+    if (c == ' ') continue;
+    int n = 0;
+    for (int j = 0; j < t_len; j++) {
+      if (qaLower(g_qa_buf[base + j]) == c) n++;
+    }
+    score += static_cast<double>(n);
+  }
+  return score / static_cast<double>(q_len);
+}

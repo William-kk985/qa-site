@@ -222,6 +222,18 @@ const JS_SNIPPETS = [
    —— 同一个坑踩过两次了（之前是 renderList 里的 empty）。 */
 let hotPlugin = null;      // 插件①：替换「热门」排序的打分
 let themePlugin = null;    // 插件②：生成整站外观（CSS）
+/* 插件③：搜索相关度打分。这是第一个**要吃字符串**的插件，所以和上面两个
+   有本质区别 —— 数字 ABI 任何语言都能过，字符串要额外一套传输方式：
+     · JS / TypeScript / ReScript / Python：原生就有字符串，直接调
+     · wasm（C / C++ / Rust）：插件多导出个 qa_buffer()，JS 把 UTF-8 写进
+       它的线性内存，再传两个长度进去
+   这里的 searchPlugin 是已经**统一好的** (query, text) => number，上层不用管
+   底下是哪种传输方式。null = 没插件或插件不支持。 */
+let searchPlugin = null;
+/* 顺带说清一个能力边界：MoonBit 目前做不到这个协议 —— 它的标准库没有任何
+   暴露缓冲区地址的接口，编译器也不导出 memory，所以 JS 没法把字节写进去。
+   （不是我们偷懒：core 库里全量搜不到 *_ptr，而 #borrow 只用于"导入"方向。）
+   MoonBit 插件因此只支持数字槽位。 */
 
 const THEME_SLOTS = [
   { i: 0, name: '主题色 色相',   lo: 0,   hi: 360,  dflt: 245 },
@@ -1692,6 +1704,14 @@ async function loadPythonPlugin(src) {
 
 /* 加载一个 JS 插件模块，返回它的导出对象。
    两种模块格式都认：ES Module（tsc / ReScript 默认）和 CommonJS（部分工具链默认）。 */
+/* 三个能力任意一个有就算合格。搜索(search_score)是可选的第三个，
+   所以判断不能写死成"必须有 theme 或 hot_score"。 */
+function hasAnyPluginExport(ex) {
+  return !!ex && (typeof ex.theme === 'function'
+    || typeof ex.hot_score === 'function'
+    || typeof ex.search_score === 'function');
+}
+
 async function loadJsPlugin(src) {
   let esmErr = null;
 
@@ -1700,7 +1720,7 @@ async function loadJsPlugin(src) {
     const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
     try {
       const mod = await import(url);
-      if (typeof mod.theme === 'function' || typeof mod.hot_score === 'function') return mod;
+      if (hasAnyPluginExport(mod)) return mod;
     } finally {
       URL.revokeObjectURL(url);   // 模块已经求值完，URL 可以立刻释放
     }
@@ -1713,24 +1733,68 @@ async function loadJsPlugin(src) {
     const mod = { exports: {} };
     new Function('module', 'exports', src)(mod, mod.exports);
     const c = mod.exports;
-    if (typeof c.theme === 'function' || typeof c.hot_score === 'function') return c;
+    if (hasAnyPluginExport(c)) return c;
   } catch (_) { /* 两种都不行，下面统一报错 */ }
 
   throw new Error(esmErr
     ? '这个 .js 连加载都失败了：' + esmErr.message
-    : '这个 .js 里既没有导出 theme（外观），也没有导出 hot_score（排序）');
+    : '这个 .js 里没有导出 theme / hot_score / search_score 中的任何一个');
+}
+
+/* 把插件的 search_score 绑成统一的 (query, text) => number。
+   native=true  ：JS / Python —— 直接把字符串传进去，最简单
+   native=false ：wasm —— 走 qa_buffer 那块线性内存（见文件头那段说明）
+   返回的字符串是给 console 看的诊断信息，没有就算了。 */
+function bindSearchPlugin(ex, native) {
+  searchPlugin = null;
+  if (!ex || typeof ex.search_score !== 'function') return null;
+
+  if (native) {
+    const fn = ex.search_score;
+    searchPlugin = (query, text) => Number(fn(query, text));
+    return '原生字符串';
+  }
+
+  /* wasm 那条路：必须同时有 qa_buffer() 和导出的 memory ——
+     缺一个都没法把字节送进去，这时就当这个插件不支持搜索，
+     而不是运行时才炸。 */
+  if (typeof ex.qa_buffer !== 'function' || !ex.memory) {
+    console.warn('[插件] 这个 wasm 导出了 search_score，但缺 qa_buffer() 或没导出 '
+      + 'memory —— 字符串送不进去，搜索打分不生效（见 plugins/README.md）');
+    return null;
+  }
+
+  const mem = ex.memory, getBuf = ex.qa_buffer, fn = ex.search_score;
+  const enc = new TextEncoder();
+  searchPlugin = (query, text) => {
+    const qb = enc.encode(query), tb = enc.encode(text);
+    const total = qb.length + tb.length;
+    /* ⚠️ 缓冲区指针和长度必须**每次重新取**：
+       wasm 内存会增长，增长后旧的 ArrayBuffer 会 detach，缓存下来的视图会失效。 */
+    const ptr = getBuf() >>> 0;
+    if (total > mem.buffer.byteLength - ptr) return NaN;   // 装不下就让上层回退
+    const view = new Uint8Array(mem.buffer, ptr, total);
+    view.set(qb, 0);
+    view.set(tb, qb.length);
+    return Number(fn(qb.length, tb.length));
+  };
+  return 'qa_buffer + 线性内存';
 }
 
 async function loadPlugins() {
   hotPlugin = null;
   themePlugin = null;
+  searchPlugin = null;
 
   try {
     let ex;
+    let native = false;                        // 是不是"原生字符串"那条路
     if (theme.pluginPy) {
       ex = await loadPythonPlugin(theme.pluginPy);
+      native = true;
     } else if (theme.pluginJs) {
       ex = await loadJsPlugin(theme.pluginJs);
+      native = true;
     } else if (theme.plugin) {
       ex = (await WebAssembly.instantiate(base64ToBytes(theme.plugin), {})).instance.exports;
     } else {
@@ -1739,11 +1803,18 @@ async function loadPlugins() {
 
     if (typeof ex.theme === 'function') themePlugin = ex.theme;
     if (typeof ex.hot_score === 'function') hotPlugin = ex.hot_score;
-    if (!themePlugin && !hotPlugin) throw new Error('既没有导出 theme，也没有导出 hot_score');
+    const searchMode = bindSearchPlugin(ex, native);
+
+    /* 「一个都没有」才拒绝。搜索是可选的第三个能力，只有它也算合格。 */
+    if (!themePlugin && !hotPlugin && !searchPlugin) {
+      throw new Error('既没有导出 theme / hot_score，也没有导出 search_score');
+    }
 
     console.log('[插件] 已加载你自己上传的插件：' + (theme.pluginName || '未命名')
       + '（' + pluginKind() + '，提供 '
-      + [themePlugin && 'theme', hotPlugin && 'hot_score'].filter(Boolean).join(' + ') + '）');
+      + [themePlugin && 'theme', hotPlugin && 'hot_score',
+         searchPlugin && ('search_score（' + searchMode + '）')].filter(Boolean).join(' + ')
+      + '）');
   } catch (e) {
     console.warn('[插件] 你自己的插件加载失败，改用站点默认：', e.message);
   }
@@ -1766,7 +1837,8 @@ function renderPluginStatus() {
   if (!el) return;
   renderPluginSlotTable();
 
-  const provide = [themePlugin && '外观（theme）', hotPlugin && '热门排序（hot_score）'].filter(Boolean);
+  const provide = [themePlugin && '外观（theme）', hotPlugin && '热门排序（hot_score）',
+                   searchPlugin && '搜索排序（search_score）'].filter(Boolean);
 
   if (provide.length) {
     const bytes = pluginBytes();
@@ -1825,7 +1897,36 @@ function visibleQuestions() {
   else if (ui.filter !== 'unanswered' && ui.filter !== 'solved') {
     list.sort((a, b) => b.createdAt - a.createdAt);
   }
+
+  /* ---- 搜索插件：只改**排序**，不改"哪些出现" ----
+     匹配仍然是上面那个内置子串判断（`includes`）。插件只决定"谁排前面"。
+     ⚠️ 这是刻意的安全契约：插件写坏了最坏是排序难看，**不会让搜索结果凭空
+        消失**。如果让插件参与过滤，一个有 bug 的插件会让用户搜不到东西，
+        而且完全不知道为什么。
+     ⚠️ 必须放在最后：前面几个 tab 各自排过序，插在中间会被覆盖掉。 */
+  if (ui.q && searchPlugin) list = rankBySearchPlugin(list, ui.q);
+
   return list;
+}
+
+/* 搜索结果的文本（和内置子串匹配用的是同一份，保证两边看到的是一回事） */
+const searchTextOf = q => q.title + '\n' + q.body + '\n' + q.tags.join(' ');
+
+function rankBySearchPlugin(list, query) {
+  try {
+    const scored = list.map(q => {
+      let s = NaN;
+      try { s = searchPlugin(query, searchTextOf(q)); } catch (_) { /* 插件报错就当没分 */ }
+      /* 返回非数字的排到最后，而不是让整份列表崩掉。
+         Number.isFinite 挡掉 NaN / Infinity / undefined。 */
+      return { q, s: Number.isFinite(s) ? s : -Infinity };
+    });
+    /* sort 是稳定的（现代 JS 规范保证），所以同分时保持原来的顺序 */
+    scored.sort((a, b) => b.s - a.s);
+    return scored.map(x => x.q);
+  } catch (_) {
+    return list;                 // 任何意外都退回原来的顺序，搜索不会因此变空
+  }
 }
 
 function renderList() {
@@ -2767,8 +2868,8 @@ document.addEventListener('change', async e => {
         }
         const { instance } = await WebAssembly.instantiate(bytes, {});
         const ex = instance.exports;
-        if (typeof ex.theme !== 'function' && typeof ex.hot_score !== 'function') {
-          throw new Error('这个 wasm 既没有导出 theme（外观），也没有导出 hot_score（排序）');
+        if (!hasAnyPluginExport(ex)) {
+          throw new Error('这个 wasm 里没有导出 theme / hot_score / search_score 中的任何一个');
         }
         theme.plugin = bytesToBase64(bytes);
         theme.pluginJs = '';

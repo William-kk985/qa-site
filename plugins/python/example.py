@@ -67,3 +67,31 @@ def hot_score(votes, answers, views, age_days):
     base = votes * 3 + answers * 5 + views / 100
     # 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
     return base / (1 + age_days / 30)
+
+
+# ===========================================================================
+# ③ 搜索相关度打分：search_score(query, text) -> float
+# ---------------------------------------------------------------------------
+# Python 和 JS 一样，**不需要任何协议** —— 字符串是原生的。
+# （wasm 那边要 qa_buffer + 线性内存，见 c/example.c 的长注释。）
+#
+# ⚠️ 打分算法必须和别的语言**逐位一致**，所以这里先 encode 成 UTF-8 字节
+#    再逐字节比。直接按 Python 的字符遍历的话，中文会和 wasm 侧对不上。
+# ===========================================================================
+def search_score(query, text):
+    """query 越相关分越高。纯 ASCII 大小写不敏感，中文按 UTF-8 字节比。"""
+    q = query.encode("utf-8")
+    t = text.encode("utf-8")
+    if not q:
+        return 0.0
+    score = 0.0
+    for qc in q:
+        c = qc + 32 if 65 <= qc <= 90 else qc
+        if c == 32:
+            continue
+        n = 0
+        for tc in t:
+            if (tc + 32 if 65 <= tc <= 90 else tc) == c:
+                n += 1
+        score += n
+    return score / len(q)

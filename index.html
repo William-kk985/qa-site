@@ -387,10 +387,15 @@
       </p>
 
       <div class="src-note">
-        <b>约定 —— 任何语言 5 分钟就能实现</b>（数字进出，不用传字符串、不用管内存）：<br>
+        <b>三个能力，随便实现几个</b>（没实现的用站点默认）：<br>
         · <code>theme(i) → number</code> —— 第 i 个外观槽位的值，<b>返回负数 = 这个槽位用站点默认</b><br>
         · <code>hot_score(点赞, 回答, 浏览, 距今天数) → number</code> —— 替换「热门」排序的打分<br>
-        两个都导出也行，<b>只实现一个也行</b>。
+        · <code>search_score(query, text) → number</code> —— 搜索时<b>决定谁排前面</b>
+        （<b>只排序，不过滤</b>：写坏了最坏是顺序难看，不会让结果消失）<br>
+        <span class="faint">前两个是纯数字，任何语言都能写。<code>search_score</code>
+        要吃字符串：JS / TypeScript / ReScript / Python 直接写就行；wasm（C / C++ / Rust）
+        要多导出一个 <code>qa_buffer()</code> 走内存协议；<b>MoonBit 目前做不到</b>。
+        细节见 <code>plugins/README.md</code>。</span>
       </div>
 
       <div class="src-note" style="margin-top:8px">

@@ -43,6 +43,29 @@ const HOT_CASES = [
   { args: [10, 5, 1000, 30], want: 32.5 },             // (30+25+10)/2
 ];
 
+/* 搜索打分的测试用例：故意混了中文、大小写、空格。
+   中文是为了逼出"按 UTF-8 字节比"这个约定 —— 如果哪个语言按码点走，
+   这里就会不一致，正好把它抓出来。 */
+const SEARCH_CASES = [
+  { q: 'ros',   t: 'ROS2 Humble 自定义消息' },
+  { q: '机器人', t: '关于强化学习中，rm定理的求解' },
+  { q: '机器人', t: '机器人 学习 强化学习' },
+  { q: 'ROS2',  t: 'ros2 humble' },
+  { q: 'a b',   t: 'aabb' },
+  { q: '',      t: '空查询应该返回 0' },
+];
+
+/* 已知**不支持**字符串 ABI 的产物。
+   ⚠️ 故意写成显式名单而不是"null 就跳过"：
+      · 静默跳过会掩盖真正的回归（某个语言本来好好的、突然不提供了）
+      · 写成名单的话，哪天 MoonBit 支持了，下面"豁免已过期"那一段会提醒我们
+        （它开始能给出分数 → 说明该更新文档和这份名单了）
+   原因见 plugins/README.md 和 plugins/moon/example/example.mbt 的注释。 */
+const NO_STRING_ABI = {
+  moonbit: 'MoonBit 标准库没有暴露缓冲区地址的接口，编译器也不导出 memory，'
+         + 'JS 没法把字节写进它的线性内存',
+};
+
 const problems = [];
 const skipped = [];
 const rows = [];
@@ -65,13 +88,16 @@ out = {
   "slots": [mod.theme(i) for i in range(9)],
   "hots": [mod.hot_score(*a) for a in ([1,2,100,3], [0,0,0,0], [10,5,1000,30])],
 }
+cases = json.loads(sys.argv[2])
+if callable(getattr(mod, "search_score", None)):
+    out["search"] = [mod.search_score(c["q"], c["t"]) for c in cases]
 print(json.dumps(out))
 `;
 
 function loadPythonPlugin(full, file) {
   /* ⚠️ PYTHONDONTWRITEBYTECODE：不然 exec_module 会在源码旁边生成
      __pycache__/*.pyc，跑一次校验就往 prebuilt/ 里塞垃圾文件（踩过）。 */
-  const r = spawnSync('python3', ['-c', PY_HARNESS, full], {
+  const r = spawnSync('python3', ['-c', PY_HARNESS, full, JSON.stringify(SEARCH_CASES)], {
     encoding: 'utf8',
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
   });
@@ -85,7 +111,7 @@ function loadPythonPlugin(full, file) {
   return {
     ex, imports: [], exports: d.exports,
     size: fs.statSync(full).size, kind: 'py',
-    slots: d.slots, hots: d.hots,
+    slots: d.slots, hots: d.hots, search: d.search ?? null,
   };
 }
 
@@ -110,7 +136,12 @@ async function loadPlugin(file) {
   // .js / .mjs：和浏览器那条路一样，用动态 import 加载
   const mod = await import(pathToFileURL(full).href + `?v=${Date.now()}`);
   const ex = {};
-  for (const k of ['theme', 'hot_score']) if (typeof mod[k] === 'function') ex[k] = mod[k];
+  /* ⚠️ 这里必须把**所有**约定的导出都拷过来。只拷两个的话，
+     新增的 search_score 会被静默丢掉，表现为"这个语言不支持搜索"——
+     看起来像插件的问题，其实是校验器自己漏了。 */
+  for (const k of ['theme', 'hot_score', 'search_score']) {
+    if (typeof mod[k] === 'function') ex[k] = mod[k];
+  }
   return {
     ex,
     imports: [],
@@ -118,6 +149,32 @@ async function loadPlugin(file) {
     size: fs.statSync(full).size,
     kind: 'js',
   };
+}
+
+/* 跑搜索打分的用例。两种传输方式：
+     · 原生字符串（js / py）：直接调
+     · wasm：走 qa_buffer + 线性内存（qa_buffer 给出地址，JS 写字节，再传两个长度）
+   返回 null 表示这个插件不支持搜索。 */
+function computeSearch(p) {
+  if (p.search) return p.search;                     // Python 那边已经算好了
+  const ex = p.ex;
+  if (!ex || typeof ex.search_score !== 'function') return null;
+
+  if (p.kind === 'js') {
+    return SEARCH_CASES.map(c => Number(ex.search_score(c.q, c.t)));
+  }
+
+  // wasm：没有 qa_buffer 或没导出 memory 就没法把字符串送进去
+  if (typeof ex.qa_buffer !== 'function' || !ex.memory) return null;
+  const enc = new TextEncoder();
+  return SEARCH_CASES.map(c => {
+    const qb = enc.encode(c.q), tb = enc.encode(c.t);
+    const ptr = ex.qa_buffer() >>> 0;
+    const view = new Uint8Array(ex.memory.buffer, ptr, qb.length + tb.length);
+    view.set(qb, 0);
+    view.set(tb, qb.length);
+    return Number(ex.search_score(qb.length, tb.length));
+  });
 }
 
 /* ------------------------------------------------------------------ 主流程 */
@@ -179,8 +236,9 @@ for (const file of files) {
       }
     });
 
-    results.set(label, { slots, hots, ...p });
-    rows.push({ label, kind: p.kind, size: p.size, exports: p.exports, slots, hots });
+    const search = computeSearch(p);
+    results.set(label, { slots, hots, search, ...p });
+    rows.push({ label, kind: p.kind, size: p.size, exports: p.exports, slots, hots, search });
   } catch (e) {
     problems.push(`${file}: 加载失败 —— ${e.message}`);
   }
@@ -202,6 +260,13 @@ for (const r of rows) {
 /* ③ 跨语言一致性：所有产物必须输出**逐位相同**的数字。
       这是「任何语言编出来的插件都等价」这句话的唯一证据。 */
 const labels = [...results.keys()];
+if (Object.keys(NO_STRING_ABI).length) {
+  console.log('\n  ⏭️  已知不支持 search_score（字符串 ABI）的产物：');
+  for (const [label, why] of Object.entries(NO_STRING_ABI)) {
+    console.log(`     · ${label} —— ${why}`);
+  }
+}
+
 if (labels.length > 1) {
   const base = results.get(labels[0]);
   console.log(`\n  以 ${labels[0]} 为基准，比对另外 ${labels.length - 1} 个：`);
@@ -224,11 +289,40 @@ if (labels.length > 1) {
         same = false;
       }
     }
-    console.log(`    ${same ? '✅' : '❌'} ${label} 与基准逐位相同`);
+    /* 搜索打分也一起比 —— 这是"字符串 ABI 跨语言一致"的证据。
+       两边都是 null（都不支持）不算不一致；一边有一边没有才算。 */
+    for (let i = 0; i < SEARCH_CASES.length; i++) {
+      const a = base.search ? base.search[i] : null;
+      const b = cur.search ? cur.search[i] : null;
+      if (a === null && b === null) continue;
+      /* 基准有、它没有 —— 但在豁免名单里就不算问题 */
+      if (b === null && a !== null && NO_STRING_ABI[label]) continue;
+      if (!Object.is(a, b)) {
+        problems.push(`不一致：${label} 的 search_score("${SEARCH_CASES[i].q}", …) = ${b}，`
+          + `而 ${labels[0]} 是 ${a}`);
+        same = false;
+      }
+    }
+    /* 被豁免的那个别说"完全相同" —— 它只是数字部分对得上，
+       字符串能力它根本没有。写清楚，不然读的人会以为它也会搜索。 */
+    const exempt = cur.search === null && NO_STRING_ABI[label];
+    console.log(`    ${same ? '✅' : '❌'} ${label} ${exempt
+      ? '数字部分与基准逐位相同（字符串 ABI 见上面的豁免说明）'
+      : '与基准逐位相同'}`);
   }
   /* problems 里此刻如果还没有"不一致"类的条目，就说明全都对得上 */
   if (!problems.some(p => p.startsWith('不一致'))) {
     console.log('\n  ✅ 所有语言编译出来的插件，输出**逐位完全相同**');
+  }
+}
+
+/* 豁免名单要能自己过期：如果名单里的产物**已经能**给出搜索分数了，
+   说明平台跟上了，该更新名单和文档 —— 别让豁免变成永久静默。 */
+for (const label of Object.keys(NO_STRING_ABI)) {
+  const r = results.get(label);
+  if (r && r.search && r.search.some(v => v !== null && Number.isFinite(v))) {
+    console.log(`\nℹ️  ${label} 现在**已经**支持字符串 ABI 了 —— `
+      + `verify.mjs 里的 NO_STRING_ABI 豁免和文档该更新了`);
   }
 }
 

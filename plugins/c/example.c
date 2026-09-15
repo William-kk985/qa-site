@@ -45,3 +45,53 @@ double hot_score(double votes, double answers, double views, double age_days) {
   /* 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜 */
   return base / (1.0 + age_days / 30.0);
 }
+
+/* ===========================================================================
+   ③ 搜索相关度打分：search_score(qLen, tLen) -> double
+   ---------------------------------------------------------------------------
+   这是**第一个要吃字符串**的插件，所以和上面两个（纯数字）不一样，
+   需要一套把字符串送进 wasm 的协议：
+
+     ① 插件导出 qa_buffer() -> 指向一块可写缓冲区的指针
+     ② JS 把 query 的 UTF-8 字节写在缓冲区开头，紧接着写 text 的 UTF-8 字节
+     ③ JS 调用 search_score(qLen, tLen)，qLen/tLen 是**字节数**
+
+   所以插件内部看到的是：
+        buf[0 .. qLen)               → query
+        buf[qLen .. qLen + tLen)     → text
+
+   ⚠️ 为什么用缓冲区而不是让 JS 传字符串指针：JS 没法直接构造 wasm 侧的
+      字符串对象。给一块自己的缓冲区是最简单、零依赖、任何 wasm 语言都能做的。
+   ⚠️ 缓冲区大小固定 64KB —— 超出就返回 NaN，上层会回退到内置顺序，
+      不会崩。搜索框里的字不会长到 64KB。
+
+   打分算法（**必须和各语言逐位一致**，所以定义得死板一点）：
+      对 query 里每个非空格字节 c（ASCII 大写转小写），数 c 在 text 里
+      出现多少次，累加；最后除以 query 的字节数。
+      按 UTF-8 字节比较，所以中文也能用，且和 JS/Python 那边结果完全相同。
+   =========================================================================== */
+#define QA_BUF_SIZE 65536
+static unsigned char qa_buf[QA_BUF_SIZE];
+
+__attribute__((export_name("qa_buffer")))
+unsigned char *qa_buffer(void) { return qa_buf; }
+
+static int qa_lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+__attribute__((export_name("search_score")))
+double search_score(int q_len, int t_len) {
+  if (q_len <= 0) return 0.0;
+  if (q_len + t_len > QA_BUF_SIZE) return 0.0 / 0.0;   /* NaN：让上层回退 */
+  const int base = q_len;
+  double score = 0.0;
+  for (int i = 0; i < q_len; i++) {
+    const int c = qa_lower(qa_buf[i]);
+    if (c == ' ') continue;
+    int n = 0;
+    for (int j = 0; j < t_len; j++) {
+      if (qa_lower(qa_buf[base + j]) == c) n++;
+    }
+    score += (double)n;
+  }
+  return score / (double)q_len;
+}

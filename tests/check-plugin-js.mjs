@@ -179,8 +179,10 @@ check('非法文件不会覆盖已经生效的插件',
 
 /* ---------- 5. 错误分支：没有任何导出的 .js ---------- */
 const noexp = await upload(NO_EXPORT_JS);
-check('上传没有导出的 .js → 提示既没有 theme 也没有 hot_score',
-  noexp.fired && noexp.got.includes('既没有导出 theme'), noexp.got);
+/* 报错文案跟着能力一起扩了：现在有三个能力（theme / hot_score / search_score），
+   所以文案不再只提两个。断言改成"说清了三个都没有"，别写死旧句子。 */
+check('上传没有导出的 .js → 提示三个能力一个都没有',
+  noexp.fired && noexp.got.includes('theme') && noexp.got.includes('search_score'), noexp.got);
 check('无导出的 .js 也不会覆盖已经生效的插件',
   (await s.ev(`pluginKind()`)) === 'js'
   && !(await s.ev(`(JSON.parse(localStorage.getItem('qa_theme_v1')||'{}').pluginJs||'').includes('notAPlugin')`)));

@@ -40,3 +40,31 @@ export function hot_score(votes, answers, views, ageDays) {
   // 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
   return base / (1 + ageDays / 30);
 }
+
+/* ===========================================================================
+   ③ 搜索相关度打分：search_score(query, text) -> number
+   ---------------------------------------------------------------------------
+   JS 这边**不需要任何协议** —— 字符串是原生的，直接传进来就行。
+   这就是"字符串扩展点对 JS/Python 几乎白送"的意思：wasm 那边要
+   qa_buffer + 线性内存（见 c/example.c 的长注释），这边两行完事。
+
+   ⚠️ 但打分算法必须和 wasm 那边**逐位一致**，所以这里先 encode 成 UTF-8
+      字节再逐字节比 —— 直接按 JS 的字符遍历的话，中文会和 wasm 侧对不上。
+   =========================================================================== */
+const QA_ENC = new TextEncoder();
+const qaLower = b => (b >= 65 && b <= 90) ? b + 32 : b;
+
+export function search_score(query, text) {
+  const q = QA_ENC.encode(query);
+  const t = QA_ENC.encode(text);
+  if (q.length === 0) return 0;
+  let score = 0;
+  for (let i = 0; i < q.length; i++) {
+    const c = qaLower(q[i]);
+    if (c === 32) continue;
+    let n = 0;
+    for (let j = 0; j < t.length; j++) if (qaLower(t[j]) === c) n++;
+    score += n;
+  }
+  return score / q.length;
+}

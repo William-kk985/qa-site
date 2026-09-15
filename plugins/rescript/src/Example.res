@@ -54,3 +54,50 @@ let hot_score = (
   // 时间衰减：30 天前发的，热度打对折，防止老帖永远霸榜
   base /. (1.0 +. ageDays /. 30.0)
 }
+
+// ===========================================================================
+// ③ 搜索相关度打分：search_score(query, text) -> float
+// ---------------------------------------------------------------------------
+// ReScript 编成 JS，所以字符串是原生的 —— 不需要 wasm 那套 qa_buffer 协议。
+// 直接借宿主的 TextEncoder 把字符串转成 UTF-8 字节，保证和 C/C++/Rust
+// 那一侧**逐位一致**（按 ReScript 字符串遍历的话，中文会对不上）。
+// ===========================================================================
+
+type textEncoder
+
+@new external makeEncoder: unit => textEncoder = "TextEncoder"
+
+// ⚠️ TextEncoder.encode 返回的是 Uint8Array，这里标成 array<int> 是个"善意的谎言"：
+//    两者在下标访问和 .length 上行为完全一样，而 ReScript 不做运行时类型检查。
+//    真写一个 Uint8Array 类型绑定要绕一圈，不值得。
+@send external encode: (textEncoder, string) => array<int> = "encode"
+
+let qaEncoder: textEncoder = makeEncoder()
+
+let qaLower = b => if b >= 65 && b <= 90 { b + 32 } else { b }
+
+@export
+let search_score = (query: string, text: string): float => {
+  let q = encode(qaEncoder, query)
+  let t = encode(qaEncoder, text)
+  let qLen = Array.length(q)
+  if qLen == 0 {
+    0.0
+  } else {
+    let tLen = Array.length(t)
+    let score = ref(0.0)
+    for i in 0 to qLen - 1 {
+      let c = qaLower(Array.getUnsafe(q, i))
+      if c != 32 {
+        let n = ref(0.0)
+        for j in 0 to tLen - 1 {
+          if qaLower(Array.getUnsafe(t, j)) == c {
+            n := n.contents +. 1.0
+          }
+        }
+        score := score.contents +. n.contents
+      }
+    }
+    score.contents /. Int.toFloat(qLen)
+  }
+}
