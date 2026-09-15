@@ -29,17 +29,37 @@ export async function call(method, apiPath, { token, body, prefer = true } = {})
   if (token) headers.Authorization = 'Bearer ' + token;
   if (prefer && ['POST', 'PATCH', 'DELETE'].includes(method)) headers.Prefer = 'return=representation';
 
-  const res = await fetch(SUPABASE_URL + apiPath, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
-  let data = null;
-  if (text.trim()) {
-    try { data = JSON.parse(text); } catch { data = text; }
+  /* ⚠️ 出口走代理，偶发把到 Supabase 的连接掐断（实测一整轮里好几个脚本同时
+     报 ECONNRESET 而红）。这类失败是网络抖动，不是应用 bug。所以只对
+     「fetch 本身失败」重试（退避 3 次）：
+       · HTTP 4xx / 5xx 一律**原样返回**，绝不重试 —— 权限用例就是靠状态码判
+         「被拒绝」的，把 4xx 重试成 200 会直接掩盖提权/越权 bug；
+       · 只有连 TCP/TLS 都没建起来的错误才重试。 */
+  let lastErr;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(SUPABASE_URL + apiPath, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await res.text();
+      let data = null;
+      if (text.trim()) {
+        try { data = JSON.parse(text); } catch { data = text; }
+      }
+      return { status: res.status, data };
+    } catch (e) {
+      lastErr = e;
+      const code = (e && e.cause && e.cause.code) || e.code || '';
+      const transient = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|UND_ERR/.test(String(code))
+        || /socket hang up|fetch failed/i.test(String(e.message));
+      if (attempt >= 2 || !transient) throw e;
+      console.warn(`⚠️  ${method} ${apiPath} 网络抖动（${code || e.message}），重试第 ${attempt + 1} 次`);
+      await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+    }
   }
-  return { status: res.status, data };
+  throw lastErr;   // 走不到，纯给读代码的人一个明确终点
 }
 
 /** 把 Supabase 的报错压成一行，方便写进 ❌ 的 detail 里。 */

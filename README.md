@@ -15,9 +15,30 @@
 
 打开 Supabase 控制台 → 左侧 **SQL Editor** → **New query** → 把 `supabase/schema.sql` 的全部内容粘贴进去 → 点 **Run**。
 
-看到 `Success. No rows returned` 就好了。
+跑完看到下面两样东西，**都是成功**：
+
+- 最后一张**小结果表**：那是脚本自带的**自检**（顶层回答 / 回复各多少条、多少人设了自定义头像），
+  不是报错。旧版脚本最后一句是 `grant`，所以那会儿显示的是 `Success. No rows returned`；
+  现在最后多了个 `select`，于是显示一张表：
+
+  | 总人数 | 有自定义头像 | 用自动生成 |
+  |---|---|---|
+  | 3 | 0 | 3 |
+
+- 可能还有一条 `NOTICE`（比如「storage.buckets 没有 file_size_limit 列（旧版 Supabase）：跳过桶级限制」）——
+  那是**故意**的降级提示，不是失败。
+
+只要没有出现红色的 `ERROR`，就成功了。
+
+> ⚠️ 如果报的是 `must be owner of table objects`：那是你们的 Supabase 项目不允许用 SQL 直接
+> 给 `storage.objects` 建策略（少见）。把第 20 节那四条 `create policy` 挪到控制台
+> **Storage → Policies → New policy** 里照着写一遍即可，其余部分照常。
 
 > **这个脚本可以随时重复运行，用来升级。** 以后表结构有变化（比如新增了收藏表），把整个文件重新跑一遍就行——它只会补上缺的东西，**不会清掉已有的问题和回答**。
+> 里面每一句都是可重跑的：`create table/index if not exists`、`create or replace function`、
+> 建之前先 `drop ... if exists`（策略 / 触发器 / 视图 / 函数）、
+> `alter table ... add column if not exists`、`drop constraint if exists` 再 `add constraint`、
+> 桶用 `insert ... on conflict do update`。加新东西时请照着这个套路写。
 
 ### 2. ⚠️ 关掉邮箱验证（**很重要，不改的话没人能正常注册**）
 
@@ -76,7 +97,7 @@ qa-site/
 ├── supabase/
 │   └── schema.sql        ← 建表 + 权限规则，粘到 Supabase 的 SQL Editor 里运行
 ├── plugins/              ← 各语言示例插件 + 构建/校验脚本（见 plugins/README.md）
-├── tests/                ← 验收测试（20 个脚本，对着真实后端跑，见 tests/README.md）
+├── tests/                ← 验收测试（对着真实后端跑，见 tests/README.md）
 └── .preview/             本地调试草稿和截图（已 gitignore，不会上传）
 ```
 
@@ -542,11 +563,11 @@ git config user.email "你的noreply邮箱@users.noreply.github.com"
 │ styles.css         │                    │  ├ 表 6 张                       │
 │ app.js             │  HTTPS + 公开 key  │  ├ 视图 3 张（前端一次查全）      │
 │   ├ 路由（#/...）  │ ─────────────────► │  ├ RPC 2 个（受控的小接口）       │
-│   ├ 渲染 render*() │                    │  └ 触发器 3 个（自动建资料/通知） │
-│   └ 数据 api.*     │                    │ Auth：邮箱密码 + GitHub OAuth    │
-│ config.js  地址/key│                    └────────────────────────────────┘
-│ vendor/supabase.js │
-└────────────────────┘
+│   ├ 渲染 render*() │                    │  ├ 触发器 5 个（建资料/通知/     │
+│   └ 数据 api.*     │                    │  │   最佳答案/回复只有一层）      │
+│ config.js  地址/key│                    │  └ Storage：avatars 桶（头像）   │
+│ vendor/supabase.js │                    │ Auth：邮箱密码 + GitHub OAuth    │
+└────────────────────┘                    └────────────────────────────────┘
     GitHub Pages 托管（push 自动发布）
 ```
 
@@ -560,15 +581,16 @@ git config user.email "你的noreply邮箱@users.noreply.github.com"
 
 | 表 | 作用 | 谁能读 | 谁能写 |
 |---|---|---|---|
-| `profiles` | 昵称（挂在 `auth.users` 旁边） | 所有人 | 只能改自己的 |
+| `profiles` | 昵称 + 头像 URL（挂在 `auth.users` 旁边） | 所有人（**真名 / 邮箱除外**） | 只能改自己的（列级授权：昵称 + 头像） |
 | `questions` | 问题 | 所有人 | 登录后发，只能改删自己的 |
-| `answers` | 回答 | 所有人 | 同上 |
+| `answers` | 回答**和回复**（`parent_id` 区分；回复只有一层） | 所有人 | 同上 |
 | `question_votes` / `answer_votes` | 点赞 | 所有人 | 只能增删自己的（主键防重复） |
 | `bookmarks` | 收藏 | **只有自己** | 只能增删自己的 |
 | `notifications` | 站内通知 | **只有自己** | **只有触发器能写入**（前端无 insert 权限，防止伪造通知钓鱼） |
 
-视图：`questions_view`、`answers_view`（把作者昵称、回答数、点赞数一次算好）、`notifications_view`。
-RPC：`accept_answer`（只有提问者能选最佳）、`increment_views`（未登录访客也能加浏览量）。
+视图：`questions_view`、`answers_view`（把作者昵称 / 头像、回答数、点赞数一次算好）、`notifications_view`。
+RPC：`accept_answer`（只有提问者能选最佳，**回复不能被选**）、`increment_views`（未登录访客也能加浏览量）。
+Storage：`avatars` 桶（public，只放头像；路径必须以自己的 `user_id` 开头）。
 
 > ⚠️ 视图必须带 `security_invoker = on`，否则会以管理员身份读数据、绕过所有 RLS，等于把表公开。
 
@@ -587,8 +609,9 @@ RPC：`accept_answer`（只有提问者能选最佳）、`increment_views`（未
 > 因为视图在第 7 / 13.5 节就建好了，那时候列还不存在，全新数据库跑脚本会报
 > `column ... does not exist`。
 >
-> 已经这么处理的列：`profiles.role`、`questions.status`、`questions.edited_at`、
-> `answers.edited_at`、`notifications.note`。
+> 已经这么处理的列：`profiles.role`、`profiles.avatar_url`、`questions.status`、
+> `questions.edited_at`、`answers.edited_at`、`answers.parent_id` / `answers.reply_to_user_id`、
+> `notifications.note`。
 
 ### 现在没做、以后可能想做的
 
@@ -596,7 +619,6 @@ RPC：`accept_answer`（只有提问者能选最佳）、`increment_views`（未
 - **编辑已发内容**：数据库的 update 权限已经给了，只差前端加个编辑框
 - **举报 / 审核**：站长现在**只能删自己的**内容。要能删别人的，得加一个 `is_admin` 字段 + 对应 RLS 规则
 - **邮件通知**：需要配 SMTP（见上面「忘记密码」那节），然后在通知触发器里加调用
-- **图片上传**：用 Supabase Storage
 
 ## 登录方式与账号绑定
 
@@ -848,6 +870,99 @@ grant select (id, display_name, role, created_at) on public.profiles to anon, au
 - ⚠️ **收藏和浏览记录是私密的，绝不显示别人的** —— 别人的主页上没有这两个标签页，
   数据库的 RLS 也只允许本人读自己的收藏（`bookmarks`）和浏览记录（`view_history`）
 
+## 回答下面的「回复」（B 站那种，**只有一层**）
+
+一条回答下面可以继续聊，形态是**一层平铺**：
+
+- 一条顶层回答下面挂它的回复列表
+- 回复某人时显示「**回复 @某人：**」，但**仍然平铺在同一层，不缩进、不嵌套**
+- 有「展开 N 条回复 / 收起」折叠，默认收起
+- 按时间**正序**（先回复的在前）
+
+**为什么不做无限嵌套**：B 站评论本身就是一层平铺。无限嵌套会带来一串连锁问题 ——
+缩进在小屏上很快就没法看、回答计数怎么算说不清、通知发给"楼上哪一位"要沿树回溯。
+所以规则是**一层**，而且这条规则钉在**数据库**里：
+
+```sql
+-- schema.sql 第 19 节
+create trigger on_answer_one_level
+  before insert or update on public.answers
+  for each row execute function public.enforce_one_level_reply();
+```
+
+它会拒绝「回复一条回复」（`parent_id` 指向的行自己也有 `parent_id`），
+也会拒绝"回复和父不在同一条问题下"和"自己挂自己"。
+
+> ⚠️ **为什么必须在数据库层拦**：前端只会在点「回复」时把 `parent_id` 写成顶层回答的 id，
+> 但那是前端的自觉。任何人拿公开密钥直接打 REST，都能给一条回复再挂一条回复 ——
+> 几天后就是一棵嵌套树，回答计数、通知、渲染全部对不上。
+> 这个项目一贯的规矩：**前端隐藏按钮不是权限**。
+
+### 一条规则，所有出入口都要对口径
+
+「回复不算"又一个回答"」这条**同时**落在这几处（改的时候一起看，漏一处数字就对不上）：
+
+| 地方 | 怎么算 |
+|---|---|
+| `questions_view.answer_count` | 只数 `parent_id is null` |
+| `weekly_stats()` 的本周 / 累计回答 | 同上（成员目录的数字） |
+| `accept_answer()` | 回复不能被选为最佳答案（报错提示写明原因） |
+| `app.js` 详情页的小节标题 / 列表卡片 | 只渲染顶层回答 |
+| `app.js` 「我的回答」列表 | 只列顶层回答（和上面的统计一致） |
+
+`answers_view` 会**同时返回顶层回答和回复**（带 `parent_id` / `reply_to`），
+前端一次查询就能把详情页要的东西全拿到，不用 N+1。
+
+删除语义和回答完全一致（回复就在 `answers` 表里，第 13 节那条 RLS 自动覆盖它）：
+
+- 删**单条回复** → 只有那一条消失
+- 删**顶层回答** → 它下面的回复由外键 `on delete cascade` 一起删
+
+通知走 `notify_on_reply`：**发给被回复的那个人**（`reply_to_user_id`，没写就退化成
+那条顶层回答的作者），自己回自己不通知。
+
+> ⚠️ `reply_to_user_id` 在数据库里**有白名单校验**：只能是"这条回答的作者"或
+> "同一层里回复过的人"。不校验的话，任何登录用户都能把它填成任意受害者，
+> 借通知触发器给对方发一条"有人回复了你" —— 那就是一个伪造通知的钓鱼入口。
+
+## 头像（上传 / 自动生成 / 点头像进主页）
+
+- **点头像进主页**：全站所有出现头像的地方（问题卡片、回答、回复、成员列表、
+  通知面板、顶栏自己的头像）都是 `#/u/<user_id>` 的链接
+- **没设头像** → 回退到**自动生成**：昵称首字 + 按名字算出来的颜色（`avatarOf()`）
+- **上传**：客户端先用原生 canvas **压到 128×128**（居中裁成正方形）再传 ——
+  手机随手拍一张就是好几 MB，而头像显示的地方最大也就几十像素
+- 「**恢复默认头像**」= 把 `avatar_url` 置回 `null`，界面自动回到自动生成那条路
+
+### 数据库那边怎么设计的
+
+| 东西 | 值 / 规则 | 为什么 |
+|---|---|---|
+| `profiles.avatar_url` | Storage 里的**公开 URL**，`null` = 没自定义头像 | 视图要引用它，所以加在第 1 节 |
+| `storage.buckets` | `avatars`，**public** | 头像本来就是要给所有人看的 |
+| 桶级上限 | 5MB，只收 `image/png` / `image/jpeg` / `image/webp` | 更强的一道，绕不过（客户端那道只是提前给提示） |
+| 上传路径 | `<user_id>/avatar.png` —— **必须以自己的 user_id 开头** | Storage 的 RLS 靠 `(storage.foldername(name))[1] = auth.uid()::text` 表达"只有本人能改自己那份" |
+| 列级授权 | `grant update (avatar_url) on public.profiles to authenticated` | profiles 的 update 早被收窄成"只能改昵称"，要单独放开这一列 |
+
+> ⚠️ **前端那道过滤也是必要的**：`avatar_url` 是用户可以自己写的列，
+> 前端只显示**以我们自己的 Storage 公开前缀开头**的地址（`safeAvatarUrl()`）。
+> 不做这个判断的话，任何人都能把自己的头像设成 `https://别人家的/1.gif`，
+> 于是**所有看过他头像的人都向他家的服务器发一次请求**（真实 IP、UA 全泄）。
+> 公开的是"那张图"，不是浏览者的行踪。
+
+### ⚠️ 隐私边界（做头像**没有**放宽任何原有规则）
+
+| 信息 | 可见范围 | 做头像之后 |
+|---|---|---|
+| 头像 | 所有人（桶是 public，拿到 URL 就能看） | 这是它的正常语义 |
+| 昵称 | 所有人 | 不变 |
+| **真实姓名** | **组员及以上** | ❌ 不变（`weekly_stats` 里对普通用户返回 null） |
+| **邮箱** | **只有本人** | ❌ 不变（任何接口都不返回别人的邮箱） |
+
+**因为这个桶是公开的，它里面只放头像** —— 邮箱 / 真实姓名之类的东西绝不能写进去。
+`schema.sql` 第 20 节里也只有一条 `update (avatar_url)` 的列级授权，
+`role` / `real_name` / `comp_years` 照旧直改不了。
+
 ## 角色怎么转移
 
 1. **A（原大管理者）** 在「成员」面板里把 **B 设成大管理者**
@@ -989,9 +1104,9 @@ update auth.users
 
 ## 功能清单
 
-已经有：**GitHub 账号一键登录**、邮箱注册 / 登录、**登录方式互相绑定 / 解绑**、**忘记密码 / 修改密码**、**改昵称 / 真实姓名 / 参赛年数（跨年自动 +1）**、**四级角色（普通用户 / 组员 / 管理者 / 大管理者）**、**管理者改标签 / 提醒 / 删除（附理由）**、**编辑自己的提问和回答**、**提问者自己标已解决**、**「我的」页面（我的提问 / 我的回答 / 浏览记录）**、**看别人的主页（`#/u/<id>`：提问 + 回答，收藏不可见）**、提问、回答、点赞（数据库层面防重复）、**收藏问题**（私密）、**站内通知**、选最佳答案、**成员目录（所有登录用户可看；昵称 / 身份 / 参赛年数 / 本周与累计统计，可按参赛年份、身份、名字筛选与排序；真名组员及以上可见）**、问题列表（最新 / 热门 / 待回答 / 已解决）、标签筛选、搜索、浏览量、深色模式、手机适配。
+已经有：**GitHub 账号一键登录**、邮箱注册 / 登录、**登录方式互相绑定 / 解绑**、**忘记密码 / 修改密码**、**改昵称 / 真实姓名 / 参赛年数（跨年自动 +1）**、**四级角色（普通用户 / 组员 / 管理者 / 大管理者）**、**管理者改标签 / 提醒 / 删除（附理由）**、**编辑自己的提问和回答**、**提问者自己标已解决**、**「我的」页面（我的提问 / 我的回答 / 浏览记录）**、**看别人的主页（`#/u/<id>`：提问 + 回答，收藏不可见）**、提问、回答、**回答下面的一层回复（「回复 @某人」+ 展开 / 收起）**、点赞（数据库层面防重复）、**收藏问题**（私密）、**站内通知**、选最佳答案、**成员目录（所有登录用户可看；昵称 / 身份 / 参赛年数 / 本周与累计统计，可按参赛年份、身份、名字筛选与排序；真名组员及以上可见）**、**头像（上传后自动压到 128×128；没设就回退到「首字 + 颜色」；点头像进主页）**、问题列表（最新 / 热门 / 待回答 / 已解决）、标签筛选、搜索、浏览量、深色模式、手机适配。
 
-还没做（按需要再加）：编辑已发内容、举报 / 审核、邮件通知、"我的提问"、分页（现在一次拉全部，问题上千条要改成分页）、图片上传。
+还没做（按需要再加）：举报 / 审核、邮件通知、分页（现在一次拉全部，问题上千条要改成分页）。
 
 ## 其他要知道的
 

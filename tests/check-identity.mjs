@@ -7,8 +7,18 @@
 import { connect, check, summary, checkNoJsErrors, waitFor } from './lib/cdp.mjs';
 
 const s = await connect();
+/* 导航记录带 unreachableUrl：外站连接被网络掐断时 Chrome 停在 chrome-error://，
+   但 frameNavigated 仍记得原本要去的地址（见下方注释）。 */
 const navigations = [];
-s.on('Page.frameNavigated', p => { if (!p.frame.parentId) navigations.push(p.frame.url); });
+s.on('Page.frameNavigated', p => {
+  if (!p.frame.parentId) navigations.push({ url: p.frame.url, unreachable: p.frame.unreachableUrl || '' });
+});
+/* 「应用有没有把浏览器导航到 GitHub」看导航记录，而不是最终加载出来的页面：
+   出口代理偶发把外站连接掐成 chrome-error://（实测一整轮里三个脚本同时中招），
+   那是环境抖动，不是功能回归。JSON 错误页那种真 bug 依然抓得到 —— 导航记录里
+   只会出现 Supabase 的地址，不会出现 github.com。 */
+const wentToGithub = () =>
+  navigations.some(n => (n.url + ' ' + n.unreachable).includes('github.com'));
 
 await s.boot();
 await s.waitData();
@@ -40,9 +50,11 @@ if (!hasLinkBtn) {
   const jumped = await waitFor(async () => (await s.ev('location.href')) !== before, 15000);
 
   if (jumped) {
-    await waitFor(async () => (await s.ev('location.href')).includes('github.com'), 15000);
+    await waitFor(async () => wentToGithub(), 15000);
+    const hit = navigations.find(n => (n.url + ' ' + n.unreachable).includes('github.com'));
     check('点击后跳去了 GitHub 授权页（说明绑定功能已开启）',
-      (await s.ev('location.href')).includes('github.com'), (await s.ev('location.href')).slice(0, 100));
+      wentToGithub(),
+      (hit ? (hit.url.startsWith('chrome-error') ? hit.unreachable : hit.url) : '地址没有变化').slice(0, 100));
     // 这条分支本来就该离开本站，不再断言「没有跳转」
   } else {
     const hint = await s.txt('#identity-hint');
@@ -52,7 +64,7 @@ if (!hasLinkBtn) {
     check('按钮没有被卡在禁用状态',
       await s.ev(`!document.querySelector('[data-action="link-github"]').disabled`));
     // 没配置时点它不应该离开本站；只有最初进站那一次导航
-    check('没有发生意外跳转', navigations.length <= 1, navigations.join(' → '));
+    check('没有发生意外跳转', navigations.length <= 1, navigations.map(n => n.url).join(' → '));
   }
 }
 

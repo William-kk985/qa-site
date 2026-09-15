@@ -119,6 +119,25 @@
   <div class="modal modal-account">
     <h2 class="modal-title">我的账号</h2>
     <p class="modal-sub">登录邮箱：<b id="profile-email"></b></p>
+
+    <!-- 头像：客户端先压到 128×128 再上传（手机随手拍的照片好几 MB，
+         而显示头像的地方最大也就几十像素）。真正的边界在数据库那边：
+         Storage 桶的 5MB / 图片类型限制 + 「路径必须以自己的 user_id 开头」的 RLS。 -->
+    <div class="avatar-edit">
+      <div class="avatar-edit-pic" id="profile-avatar"></div>
+      <div class="avatar-edit-body">
+        <div class="avatar-edit-actions">
+          <button type="button" class="btn btn-soft btn-sm" data-action="avatar-pick">上传头像</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="avatar-reset">恢复默认头像</button>
+        </div>
+        <p class="hint" id="avatar-hint">支持 PNG / JPG / WebP，原图不超过 5MB，会自动压成 128×128 再传。</p>
+      </div>
+      <!-- accept 只是让手机相册少显示几个无关文件；类型/大小的真正判断在 app.js
+           和数据库桶策略里，改这里绕不过去 -->
+      <input type="file" id="avatar-file" class="hidden"
+             accept="image/png,image/jpeg,image/webp">
+    </div>
+
     <form id="profile-form">
       <label class="field">
         <span class="field-label">昵称（别人看到的名字）</span>

@@ -41,10 +41,14 @@
 /**
  * 作者 / 通知发起人（视图里带出来的那一小撮字段）。
  * id 为 null = 账号已注销，界面回落到「匿名用户 / 某人」。
+ * ⚠️ avatarUrl 来自视图 author jsonb 里的 avatar_url（mapAuthor 转的）。
+ *    null = 没设自定义头像 → 回落到 avatarOf() 的「首字 + 颜色」。
+ *    它**故意是公开信息**：头像本来就要展示给所有人看（Storage 桶也是 public）。
  * @typedef {object} AuthorRef
  * @property {string|null} id
  * @property {string} name
  * @property {Role} role
+ * @property {string|null} avatarUrl
  */
 
 /**
@@ -69,7 +73,15 @@
 /** 问题详情 = 问题 + 它的回答（api.get 的返回值）。 @typedef {Question & { answers: Answer[] }} QuestionDetail */
 
 /**
- * 一条回答。questionTitle 是视图顺手带出来的（「我的回答」要显示它）。
+ * 一条回答**或一条回复**（数据库里是同一张表 answers，靠 parent_id 区分）。
+ * questionTitle 是视图顺手带出来的（「我的回答」要显示它）。
+ *
+ * parentId       null = 顶层回答；非 null = 挂在某条顶层回答下的回复
+ * replyToUserId  这条回复"回复谁"的（只影响显示「回复 @某人」和通知发给谁）
+ * replyTo        上面那个人的作者信息（视图直接带出来，省一次查询）
+ *
+ * ⚠️ 层级**只有一层**（B 站评论那样的一层平铺），数据库里有 enforce_one_level_reply()
+ *    挡着二级嵌套 —— 前端拿到的 parentId 一定指向一条顶层回答。
  * @typedef {object} Answer
  * @property {string} id
  * @property {string} questionId
@@ -80,6 +92,9 @@
  * @property {number} votes
  * @property {string} authorId
  * @property {AuthorRef} author
+ * @property {string|null} parentId
+ * @property {string|null} replyToUserId
+ * @property {AuthorRef|null} replyTo
  */
 
 /**
@@ -96,6 +111,7 @@
  * @property {number} answers_this_week
  * @property {number} questions_total
  * @property {number} answers_total
+ * @property {string|null} avatar_url
  */
 
 /**
@@ -108,6 +124,7 @@
  * @property {Role} role
  * @property {string} realName
  * @property {number|null} compYears
+ * @property {string|null} avatarUrl
  */
 
 /**
@@ -260,6 +277,9 @@
  * @property {number|null} votes
  * @property {string} author_id
  * @property {AuthorRef|null} author
+ * @property {string|null} parent_id
+ * @property {string|null} reply_to_user_id
+ * @property {AuthorRef|null} reply_to
  */
 
 /* ------------------------------ 小工具 ------------------------------ */
@@ -305,12 +325,76 @@ function avatarOf(name) {
   return { color: AVATAR_COLORS[h % AVATAR_COLORS.length], initial: [...String(name)][0] || '?' };
 }
 
+/* ------------------------------ 头像 ------------------------------
+   两条并存的显示路径，缺一不可：
+     · 用户上传过 → profiles.avatar_url 是 Storage 里的公开 URL → 显示图片
+     · 没上传（null）→ **回落到 avatarOf() 的「首字 + 颜色」**（别弄坏这个 fallback：
+       GitHub 登录、没网、刚注册的人全都靠它）
+   ------------------------------------------------------------------ */
+
+/**
+ * 只认**我们自己 Storage 桶**里那张头像，别的一律当没有。
+ *
+ * 为什么非要这道过滤：avatar_url 是用户可以自己写的列（"恢复默认头像"就是把它置空）。
+ * 如果前端原样塞进 <img src>，任何人都能把自己的头像设成 `https://别人家的/1.gif`，
+ * 于是**所有看过他头像的人都向他家的服务器发一次请求**（真实 IP、UA 全泄）。
+ * 这跟"头像公开"是两码事 —— 公开的是那张图，不是浏览者的行踪。
+ * 顺带也挡掉了井号/引号之类拼进属性里的东西（esc 是第一道，这是第二道）。
+ * @param {string|null|undefined} url
+ * @returns {string|null}
+ */
+function safeAvatarUrl(url) {
+  if (!url) return null;
+  const base = String(CFG.SUPABASE_URL || '').replace(/\/$/, '');
+  if (!base) return null;
+  const prefix = base + '/storage/v1/object/public/avatars/';
+  return String(url).startsWith(prefix) ? String(url) : null;
+}
+
+/**
+ * 头像的 HTML（全站唯一出口）。
+ *
+ * mode：
+ *   'link' —— 包一层 <a href="#/u/<id>">，**点头像就进 TA 的主页**（默认）
+ *   'none' —— 自己账号弹窗里那个大预览，不用可点（就在自己主页上，点了没意义）
+ *   'held' —— 通知面板那种"整条已经是一个 <button>"的地方。HTML 不允许 <a> 嵌在
+ *             <button> 里，硬塞会导致点头像同时触发两件事；所以这里用带
+ *             data-action="user" 的 <span>，由事件委托跳转，效果一样。
+ *
+ * ⚠️ 没有 id 的人（账号已注销）不包链接 —— 否则会跳到 #/u/null。
+ * @param {AuthorRef|null} user
+ * @param {string} [size]  '' | 'lg' | 'xl'
+ * @param {'link'|'none'|'held'} [mode]
+ * @returns {string}
+ */
+function avatarHtml(user, size = '', mode = 'link') {
+  const name = (user && user.name) || '匿名用户';
+  const url = safeAvatarUrl(user && user.avatarUrl);
+  const a = avatarOf(name);
+
+  /* 有自定义头像就显示图片，否则是首字 + 颜色。
+     alt 留空是有意的：名字就在头像旁边，读屏再念一遍是噪音。 */
+  const inner = url
+    ? `<img src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : esc(a.initial);
+  const style = url ? '' : ` style="background:${a.color}"`;
+  const box = `<span class="avatar ${size}"${style}>${inner}</span>`;
+
+  const id = user && user.id;
+  if (!id || mode === 'none') return box;
+  if (mode === 'held') {
+    return `<span class="avatar-link" data-action="user" data-u="${esc(id)}"
+      title="看 TA 的主页">${box}</span>`;
+  }
+  return `<a class="avatar-link" href="#/u/${encodeURIComponent(id)}"
+    title="看 TA 的主页" aria-label="看 ${esc(name)} 的主页">${box}</a>`;
+}
+
 /** @param {AuthorRef|null} user @param {number|null} [ts] @param {string} [size] @returns {string} */
 function userChip(user, ts, size = '') {
   const name = (user && user.name) || '匿名用户';
-  const a = avatarOf(name);
   return `<span class="user">
-    <span class="avatar ${size}" style="background:${a.color}">${esc(a.initial)}</span>
+    ${avatarHtml(user, size)}
     <span>${esc(name)}</span>
     ${roleBadge(user)}
     ${ts ? `<span class="dot">·</span><span>${timeAgo(ts)}</span>` : ''}
@@ -1086,6 +1170,19 @@ const bookmarkBtn = id => {
 
 /* ------------------------------ 数据接口 ------------------------------ */
 /**
+ * 视图里的 author / actor / reply_to 是同一个 jsonb 形状，统一在这里转 camelCase。
+ * 单独一个函数是为了让三处（问题作者、回答作者、通知发起人）不会各自漏掉头像。
+ * @param {{id?: string|null, name?: string, role?: Role, avatar_url?: string|null}|null} [a]
+ * @returns {AuthorRef}
+ */
+const mapAuthor = a => ({
+  id: (a && a.id) || null,
+  name: (a && a.name) || '匿名用户',
+  role: (a && a.role) || 'user',
+  avatarUrl: (a && a.avatar_url) || null,
+});
+
+/**
  * 把 questions_view 的一行转成界面用的 Question（snake_case → camelCase）。
  * @param {QuestionRow} r
  * @returns {Question}
@@ -1103,11 +1200,13 @@ const mapQuestion = r => ({
   status: r.status || 'open',
   authorId: r.author_id,
   editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
-  author: r.author || { id: null, name: '匿名用户', role: 'user' },
+  author: mapAuthor(r.author),
 });
 
 /**
- * 把 answers_view 的一行转成界面用的 Answer。
+ * 把 answers_view 的一行转成界面用的 Answer（回答和回复都走这里）。
+ * parent_id / reply_to_user_id 是数据库升级后才有的列 —— 老库上读回来是
+ * undefined，这里统一兜成 null，于是"全是顶层回答"，页面照常能用。
  * @param {AnswerRow} r
  * @returns {Answer}
  */
@@ -1120,7 +1219,10 @@ const mapAnswer = r => ({
   editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
   votes: r.votes || 0,
   authorId: r.author_id,
-  author: r.author || { id: null, name: '匿名用户', role: 'user' },
+  author: mapAuthor(r.author),
+  parentId: r.parent_id || null,
+  replyToUserId: r.reply_to_user_id || null,
+  replyTo: r.reply_to ? mapAuthor(r.reply_to) : null,
 });
 
 const api = {
@@ -1205,12 +1307,20 @@ const api = {
 
   /* ---- 「我的」页面 ---- */
   /* 某个人的回答（自己或别人都走这里）—— 看别人主页时复用同一段取数逻辑 */
-  /** @param {string} userId @returns {Promise<Answer[]>} */
+  /**
+   * @param {string} userId
+   * @returns {Promise<Answer[]>} 只返回**顶层回答**
+   */
   async listAnswersBy(userId) {
     const { data, error } = await sb.from('answers_view')
       .select('*').eq('author_id', userId).order('created_at', { ascending: false });
     if (error) throw error;
-    return data.map(mapAnswer);
+    /* ⚠️ 在**前端**过滤掉回复，而不是加一个 `.is('parent_id', null)` 查询条件：
+       那个条件在还没升级的库上会因为列不存在而整页报错，而这里的过滤在老库上
+       自动退化成"没有回复可滤"。口径和 questions_view.answer_count /
+       weekly_stats.answers_total 一致 —— 回复不算"一个回答"，
+       否则会看到"统计说 3 个回答，列表里有 8 条"这种对不上的画面。 */
+    return data.map(mapAnswer).filter(a => !a.parentId);
   },
 
   /** @returns {Promise<void>} */
@@ -1341,6 +1451,13 @@ const api = {
       let changed = false;
       if (row.role && row.role !== me.role) { me.role = row.role; changed = true; }
       if (row.display_name && row.display_name !== me.name) { me.name = row.display_name; changed = true; }
+      /* 头像也一起同步：同一个账号在别的标签页/设备上换过头像时，这里能跟上
+         （（row.avatar_url || null）而不是 row.avatar_url —— 老库上这个字段是
+          undefined，"恢复默认头像"后是 null，两者都该覆盖掉本地的旧值）。 */
+      if ((row.avatar_url || null) !== me.avatarUrl) {
+        me.avatarUrl = row.avatar_url || null;
+        changed = true;
+      }
       if (changed) renderUserBox();
     } catch (_) { /* 忽略 */ }
   },
@@ -1360,7 +1477,7 @@ const api = {
         isRead: r.is_read,
         createdAt: Date.parse(r.created_at),
         questionId: r.question_id,
-        actor: r.actor || { id: null, name: '某人', role: 'user' },
+        actor: mapAuthor(r.actor),
         questionTitle: r.question_title || '（问题已删除）',
         note: r.note || '',
       }));
@@ -1395,6 +1512,32 @@ const api = {
   async addAnswer(questionId, body) {
     const { error } = await sb.from('answers')
       .insert({ question_id: questionId, author_id: me.id, body });
+    if (error) throw error;
+  },
+
+  /**
+   * 发一条**回复**（B 站评论式的一层平铺）：它和回答是同一张表的一行，
+   * 靠 parent_id 指向那条顶层回答。带 reply_to_user_id 就显示「回复 @某人」，
+   * 通知也发给那个人；不带就是直接回复这条回答（通知发给回答的作者）。
+   *
+   * ⚠️ 前端这两个字段只是"表达意图"，真正说了算的是数据库：
+   *     · enforce_one_level_reply() 挡二级嵌套，并校验父必须是顶层回答
+   *     · 同一个函数还校验 reply_to_user_id 只能是"这条回答的作者"或
+   *       "同一层里回复过的人" —— 否则任何人都能借通知触发器给受害者发通知
+   * @param {string} questionId
+   * @param {string} parentId 顶层回答的 id
+   * @param {string|null} replyToUserId 回复谁；null = 直接回复这条回答
+   * @param {string} body
+   * @returns {Promise<void>}
+   */
+  async addReply(questionId, parentId, replyToUserId, body) {
+    const { error } = await sb.from('answers').insert({
+      question_id: questionId,
+      author_id: me.id,
+      body,
+      parent_id: parentId,
+      reply_to_user_id: replyToUserId,
+    });
     if (error) throw error;
   },
 
@@ -1470,7 +1613,7 @@ async function applySession(session) {
      标上 Role 是为了让下面 `role = row.role` 和 me.role 对得上。 */
   /** @type {Role} */
   let role = 'user';
-  let realName = '', compYears = null;
+  let realName = '', compYears = null, avatarUrl = null;
 
   // 用函数读自己的资料：真名和参赛年数没有开放列级查询权限，只能走这个函数
   try {
@@ -1482,23 +1625,29 @@ async function applySession(session) {
       realName = row.real_name || '';
       compYears = (row.comp_years === null || row.comp_years === undefined)
         ? null : Number(row.comp_years);
+      avatarUrl = row.avatar_url || null;
     }
   } catch (_) { /* profiles 还没升级时用兜底值 */ }
 
-  me = { id: u.id, name, email: u.email || '', role, realName, compYears };
+  me = { id: u.id, name, email: u.email || '', role, realName, compYears, avatarUrl };
   await Promise.all([api.loadMyVotes(), api.loadMyBookmarks(), api.loadNotices()]);
 }
 
 function renderUserBox() {
   const box = $('#user-box');
   if (me) {
-    const a = avatarOf(me.name);
+    /* ⚠️ 头像和「我的账号」按钮是**两个**元素，不是一个：
+       需求是"自己的头像点进去要是自己的主页"，而姓名那块继续开账号弹窗。
+       以前整块是一个 button，头像没法单独做链接（<a> 不能嵌在 <button> 里）。
+       测试用的 [data-action="profile"] 仍然在 —— 只是现在只剩姓名那一块。 */
     box.innerHTML = `
-      <button class="user user-btn" data-action="profile" title="我的账号">
-        <span class="avatar" style="background:${a.color}">${esc(a.initial)}</span>
-        <span class="hide-sm">${esc(me.name)}</span>
-        ${roleBadge(me)}
-      </button>`;
+      <span class="user user-box-inner">
+        ${avatarHtml({ id: me.id, name: me.name, role: me.role, avatarUrl: me.avatarUrl })}
+        <button class="user user-btn" data-action="profile" title="我的账号">
+          <span class="hide-sm">${esc(me.name)}</span>
+          ${roleBadge(me)}
+        </button>
+      </span>`;
   } else {
     box.innerHTML = `<button class="btn btn-soft" data-action="login">登录 / 注册</button>`;
   }
@@ -1633,12 +1782,139 @@ function renderIdentities() {
   box.innerHTML = rows + addGithub;
 }
 
+/* ------------------------------ 头像上传 ------------------------------
+   需求：客户端**先压到 128×128** 再传 —— 手机随手拍一张就是好几 MB，
+   而头像显示的地方最大也就几十像素。不压的话上传慢、白占存储，
+   还会顶到 Storage 桶的 5MB 限制。
+
+   ⚠️ 分清楚哪条是"体验"、哪条是"边界"：
+     · 这里的 5MB / 类型判断 + canvas 压缩 = **体验**（给一句人话提示、省流量）
+     · 真正的边界在数据库：桶的 file_size_limit / allowed_mime_types，
+       以及"路径必须以自己的 user_id 开头"的 Storage RLS。
+       把 app.js 改了绕不过那两条 —— 前端隐藏按钮不是权限，这条一贯如此。
+   ---------------------------------------------------------------------- */
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;   // 和 schema.sql 桶上的 file_size_limit 一致
+const AVATAR_PX = 128;                      // 压出来的正方形边长
+/** 只收这三种，和桶的 allowed_mime_types 一致 */
+const AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
+/** @param {string} msg @param {boolean} [bad] */
+function setAvatarHint(msg, bad) {
+  const el = $('#avatar-hint');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('is-error', !!bad);
+}
+
+/**
+ * 账号弹窗里那块头像预览。
+ * 用 avatarHtml(..., 'xl', 'none')：不包链接 —— 这里本来就是"自己看自己"。
+ */
+function renderProfileAvatar() {
+  const box = $('#profile-avatar');
+  if (!box || !me) return;
+  box.innerHTML = avatarHtml(
+    { id: me.id, name: me.name, role: me.role, avatarUrl: me.avatarUrl }, 'xl', 'none');
+}
+
+/**
+ * 用原生 canvas 把图片**居中裁成正方形**再缩到 128×128。
+ * 不引第三方库 —— "零构建、零依赖"是这个站的前提（README 三条铁律之一）。
+ * @param {File} file
+ * @returns {Promise<Blob>}
+ */
+function compressAvatar(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        const side = Math.min(w, h) || AVATAR_PX;
+        const c = document.createElement('canvas');
+        c.width = c.height = AVATAR_PX;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        // 从原图中间裁一块正方形再画进去：不这么做，长方形照片会被拉变形
+        ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, AVATAR_PX, AVATAR_PX);
+        c.toBlob(b => (b ? resolve(b) : reject(new Error('图片处理失败'))), 'image/png');
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('这个文件不是能识别的图片'));
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * 上传头像：校验 → 压到 128×128 → 传到 `<我的 user_id>/avatar.png` → 写回 avatar_url。
+ *
+ * ⚠️ 路径**必须**以 user_id 开头：Storage 的 RLS 用
+ *    `(storage.foldername(name))[1] = auth.uid()::text` 表达"只有本人能改自己目录"。
+ *    换成别的命名（比如按时间戳）这条规则根本写不出来。
+ * ⚠️ 桶是 public：拿到 URL 就能看。头像是给人看的公开信息，这是正常语义；
+ *    所以这个桶里**只放头像**，绝不放邮箱 / 真实姓名那些（真实姓名的可见性
+ *    规则仍然是「组员及以上」，不因为做头像而放宽）。
+ * @param {File} file
+ * @returns {Promise<void>}
+ */
+async function uploadAvatar(file) {
+  if (!AVATAR_TYPES.includes(file.type)) {
+    setAvatarHint('只支持 PNG / JPG / WebP 图片（这个文件是 ' + (file.type || '未知类型') + '）', true);
+    toast('只能传 PNG / JPG / WebP 图片');
+    return;
+  }
+  if (file.size > AVATAR_MAX_BYTES) {
+    setAvatarHint(`这张图 ${(file.size / 1048576).toFixed(1)}MB，超过 5MB 上限了，换一张吧`, true);
+    toast('图片超过 5MB');
+    return;
+  }
+
+  setAvatarHint('正在压缩并上传…');
+  try {
+    const blob = await compressAvatar(file);
+    const path = me.id + '/avatar.png';
+    const up = await sb.storage.from('avatars').upload(path, blob, {
+      upsert: true, contentType: 'image/png', cacheControl: '3600',
+    });
+    if (up.error) throw up.error;
+
+    /* 路径是固定的（一人一份，重复上传就覆盖那个文件），所以地址永远一样 ——
+       不带个版本号的话浏览器会把旧图缓存住，用户换了头像却看不到变化。 */
+    const { data } = sb.storage.from('avatars').getPublicUrl(path);
+    const url = data.publicUrl + '?v=' + Date.now();
+
+    /* 头像列是**列级授权**放开的（schema.sql 20.3）：profiles 的 update
+       只给了 display_name 和 avatar_url 两列，改不了 role / real_name。 */
+    const { error } = await sb.from('profiles').update({ avatar_url: url }).eq('id', me.id);
+    if (error) throw error;
+
+    me.avatarUrl = url;
+    renderProfileAvatar();
+    renderUserBox();
+    setAvatarHint(`已更新头像（原图 ${Math.round(file.size / 1024)}KB → 压到 ${AVATAR_PX}×${AVATAR_PX}）`);
+    toast('头像已更新');
+  } catch (err) {
+    const ex = explain(err);
+    setAvatarHint(errMsg(ex), true);
+    toast(errMsg(ex));
+  }
+}
+
 async function openProfile() {
   if (!me) return;
 
   $('#profile-email').textContent = me.email || '—';
   $('#profile-form [name=display_name]').value = me.name;
   $('#profile-error').classList.add('hidden');
+  renderProfileAvatar();
+  setAvatarHint('支持 PNG / JPG / WebP，原图不超过 5MB，会自动压成 128×128 再传。');
   $('#identity-hint').textContent = '绑到一起之后，这几种方式都能登进同一个账号，看到的内容也是同一份。';
   $('#identity-hint').classList.remove('is-error');
   $('#identity-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
@@ -1731,6 +2007,11 @@ function renderNotices() {
       text = `<b>${esc(n.actor.name)}</b> 回答了你的问题 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
     } else if (n.type === 'accept') {
       text = `<b>${esc(n.actor.name)}</b> 把你的回答选为了最佳答案 <span class="notice-q">《${esc(n.questionTitle)}》</span>`;
+    } else if (n.type === 'reply') {
+      /* 回复的通知里 answer_id 指向**那条回复自己**，note 是回复正文的前 80 字
+         （触发器写的）—— 所以这里直接把内容带出来，不用点进去也知道说了什么。 */
+      text = `<b>${esc(n.actor.name)}</b> 回复了你 <span class="notice-q">《${esc(n.questionTitle)}》</span>`
+        + (n.note ? `<span class="notice-excerpt">${esc(excerpt(n.note, 50))}</span>` : '');
     } else if (n.type === 'removed') {
       text = `<b>${esc(n.actor.name)}</b> 删除了你的一个问题 <span class="notice-q">${esc(n.note || '')}</span>`;
     } else if (n.type === 'remind') {
@@ -1742,6 +2023,7 @@ function renderNotices() {
     return `<button class="notice ${n.isRead ? '' : 'is-unread'}"
               data-action="notice-open" data-id="${n.id}" data-q="${n.questionId || ''}">
       <span class="dot2" ${n.isRead ? 'style="visibility:hidden"' : ''}></span>
+      ${avatarHtml(n.actor, '', 'held')}
       <span class="notice-body">
         <span class="notice-title">${text}</span>
         <span class="notice-time">${timeAgo(n.createdAt)}</span>
@@ -1927,6 +2209,7 @@ function renderMembers() {
     return `<div class="member-row">
       <div class="member-info">
         <div class="member-name">
+          ${avatarHtml({ id: m.user_id, name: m.display_name, role: m.role, avatarUrl: m.avatar_url }, 'lg')}
           <a class="member-link" href="#/u/${m.user_id}">${who}</a>
           ${roleBadge(m)}${isSelf ? '<span class="faint">（我）</span>' : ''}
         </div>
@@ -2529,8 +2812,12 @@ function memberHead(userId, answers) {
       + `<span>·</span><span>回答 <b>${dash(m.answers_total)}</b></span>`
     : '';
 
+  /* 头像优先用成员目录里那份（weekly_stats 直接返回 avatar_url），
+     拉不到目录时退化成问题 / 回答里带的作者头像，再没有就是首字 + 颜色。 */
+  const avatarUrl = (m && m.avatar_url) || (fallback && fallback.avatarUrl) || null;
+
   return `<div class="panel member-head">
-    <div>${userChip({ id: userId, name, role }, null, 'lg')}</div>
+    <div>${userChip({ id: userId, name, role, avatarUrl }, null, 'lg')}</div>
     <div class="member-meta">
       ${real}<span>参赛 ${years}</span>${counts}
     </div>
@@ -2632,6 +2919,101 @@ async function renderUserPage(userId, { isSelf }) {
     <div>${body}</div>`;
 }
 
+/* --------------------------- 回复（B 站式一层平铺） ---------------------------
+   一条顶层回答下面挂它的回复列表；**不缩进、不嵌套**，所有回复平铺在同一层。
+   回复某人时只是多一句「回复 @某人：」—— 这正是 B 站的做法，也是数据库
+   唯一允许的形态（enforce_one_level_reply 会拒绝二级嵌套）。
+
+   折叠状态和"正在回复谁"都放在模块级变量里，不落库也不进 localStorage：
+   它们是**这一次浏览**的临时状态，刷新后回到「全部收起」最不意外。
+   放在模块级（而不是 renderDetail 的局部变量）是因为点一下按钮会整块重渲染，
+   局部变量会被冲掉 —— 展开的列表会莫名其妙又合上。
+   ---------------------------------------------------------------------------- */
+/** @type {Set<string>} 展开着的顶层回答 id */
+const expandedReplies = new Set();
+/** @type {{answerId: string, userId: string|null, name: string}|null} 当前正在回复谁 */
+let replyTarget = null;
+
+/**
+ * 一条回复的 HTML。
+ * ⚠️ 刻意**不加缩进 / 不画竖线**：那会暗示"还能再往下套一层"，
+ *    而数据库只允许一层。视觉上平铺，规则才和界面一致。
+ * @param {Answer} r
+ * @param {QuestionDetail} q
+ * @returns {string}
+ */
+function replyHtml(r, q) {
+  const mine = isMine(r.author);
+  const to = r.replyTo;
+  return `<div class="reply" id="reply-${r.id}">
+    <div class="reply-top">
+      <span class="who">
+        ${avatarHtml(r.author)}
+        <span>${esc(r.author.name)}</span>
+        ${roleBadge(r.author)}
+        ${to ? `<span class="reply-to">回复
+          <a href="#/u/${encodeURIComponent(to.id || '')}">@${esc(to.name)}</a>：</span>` : ''}
+        <span class="dot">·</span><span>${timeAgo(r.createdAt)}</span>
+        ${r.editedAt ? '<span class="faint" style="font-size:12px">已编辑</span>' : ''}
+      </span>
+      <span class="reply-actions">
+        <button class="vote-btn ${hasVoted('a', r.id) ? 'is-on' : ''}"
+                data-action="vote-a" data-q="${q.id}" data-a="${r.id}">▲ 有用 ${r.votes}</button>
+        ${me ? `<button class="btn btn-ghost btn-sm" data-action="reply-to"
+                data-a="${r.parentId}" data-u="${esc(r.authorId)}"
+                data-name="${esc(r.author.name)}">回复</button>` : ''}
+        ${mine ? `<button class="btn btn-ghost btn-sm" data-action="edit-a"
+                data-a="${r.id}">编辑</button>
+          <button class="btn btn-ghost btn-sm" data-action="del-a"
+                data-a="${r.id}">删除</button>` : ''}
+        ${canManage(r.author) ? `<button class="btn btn-ghost btn-sm" data-action="del-a-admin"
+                data-a="${r.id}" data-name="${esc(r.author.name)}">删除（管理）</button>` : ''}
+      </span>
+    </div>
+    <div class="body-text">${esc(r.body)}</div>
+  </div>`;
+}
+
+/**
+ * 一条顶层回答下面的回复区：折叠开关 + 回复列表 + 回复框。
+ * 默认**收起** —— 一条回答下面聊了十几句时，全铺开会把详情页撑得没法看；
+ * 折叠开关上写着条数，所以不会"藏着不知道"。
+ * @param {Answer} a
+ * @param {Answer[]} replies 已按时间**正序**（先回复的在前）排好
+ * @param {QuestionDetail} q
+ * @returns {string}
+ */
+function replyZone(a, replies, q) {
+  const open = expandedReplies.has(a.id);
+  const target = (replyTarget && replyTarget.answerId === a.id) ? replyTarget : null;
+
+  const toggle = replies.length
+    ? `<button type="button" class="linkbtn reply-toggle" data-action="toggle-replies"
+         data-a="${a.id}" aria-expanded="${open ? 'true' : 'false'}">
+         ${open ? '收起回复' : `展开 ${replies.length} 条回复`}</button>`
+    : '';
+
+  const list = replies.length
+    ? `<div class="reply-list ${open ? '' : 'hidden'}" data-replies="${a.id}">
+         ${replies.map(r => replyHtml(r, q)).join('')}
+       </div>`
+    : '';
+
+  /* 回复框：登录才有。data-to 是"回复谁"的用户 id，为空表示直接回复这条回答
+     （数据库会把通知发给回答作者，见 notify_on_reply 的 coalesce）。 */
+  const to = target && target.userId ? target.userId : '';
+  const form = me ? `
+    <form class="reply-form" data-q="${q.id}" data-parent="${a.id}" data-to="${esc(to)}">
+      ${target ? `<div class="reply-hint">回复 <b>@${esc(target.name)}</b>：
+        <button type="button" class="linkbtn" data-action="reply-cancel">取消</button></div>` : ''}
+      <textarea name="body" rows="2" required
+        placeholder="${target ? `回复 @${esc(target.name)}…` : `回复 ${esc(a.author.name)} 的这条回答…`}"></textarea>
+      <button class="btn btn-soft btn-sm" type="submit">发布回复</button>
+    </form>` : '';
+
+  return `<div class="replies">${toggle}${list}${form}</div>`;
+}
+
 /* ------------------------------ 页面：详情 ------------------------------ */
 /** @param {QuestionDetail|null} q */
 function renderDetail(q) {
@@ -2645,9 +3027,24 @@ function renderDetail(q) {
     return;
   }
 
+  /* 换了另一条问题就把折叠状态清掉：留着上一条的 id 没意义，
+     而"正在回复谁"跨问题保留更危险（会把回复挂到别的问题的回答上）。 */
+  if (!currentQuestion || currentQuestion.id !== q.id) {
+    expandedReplies.clear();
+    replyTarget = null;
+  }
   currentQuestion = q;
 
-  const answers = q.answers.slice().sort((a, b) => {
+  /* ★ 计数和最佳答案都只看**顶层回答**：
+     回复是聊给某个人的，不是"又一个回答"。同一口径在数据库那边也有三处
+     （questions_view.answer_count、weekly_stats.answers_total、
+      accept_answer 拒绝回复），前端这里是第四处，少了它页面上的数字会虚高。 */
+  const top = q.answers.filter(a => !a.parentId);
+  const repliesOf = id => q.answers
+    .filter(a => a.parentId === id)
+    .sort((a, b) => a.createdAt - b.createdAt);      // 正序：先回复的在前
+
+  const answers = top.slice().sort((a, b) => {
     if (a.id === q.acceptedAnswerId) return -1;
     if (b.id === q.acceptedAnswerId) return 1;
     return b.votes - a.votes || a.createdAt - b.createdAt;
@@ -2655,6 +3052,7 @@ function renderDetail(q) {
 
   const answerHtml = answers.length ? answers.map(a => {
     const accepted = a.id === q.acceptedAnswerId;
+    const replies = repliesOf(a.id);
     return `
     <article class="answer ${accepted ? 'is-accepted' : ''}">
       <div class="answer-top">
@@ -2677,6 +3075,7 @@ function renderDetail(q) {
         </div>
       </div>
       <div class="body-text">${esc(a.body)}</div>
+      ${replyZone(a, replies, q)}
     </article>`;
   }).join('') : `
     <div class="empty">
@@ -2749,7 +3148,7 @@ function renderDetail(q) {
     </article>
 
     <section class="answers">
-      <div class="section-title">${q.answers.length} 个回答</div>
+      <div class="section-title">${top.length} 个回答</div>
       ${answerHtml}
       ${answerForm}
     </section>`;
@@ -2833,9 +3232,11 @@ async function route() {
       }
       renderDetail(await api.get(id));
     } else if (hash.startsWith('#/u/')) {
-      /* 成员主页：从成员目录点人名进来。先把成员弹窗收掉，
-         否则它会盖在刚渲染出来的主页上面（弹窗不在 #app 里，不会被重渲染冲掉）。 */
-      closeMembers();
+      /* 成员主页：从成员目录点人名 / 点头像进来。先把这几个弹窗收掉，
+         否则它们会盖在刚渲染出来的主页上面（弹窗不在 #app 里，不会被重渲染冲掉）。
+         ⚠️ 账号弹窗也要收 —— 顶栏头像现在是个链接，点它就该看到主页，
+            不能还压着一层「我的账号」。 */
+      closeMembers(); closeProfile(); closeNotices();
       await renderUser(decodeURIComponent(hash.slice(4)));
     } else if (hash === '#/me') {
       await renderMy();
@@ -2898,6 +3299,47 @@ document.addEventListener('click', async e => {
 
       case 'login':
         openAuth('login');
+        break;
+
+      case 'user': {
+        /* 通知面板里的头像走这条（那个位置不能放 <a>，见 avatarHtml 的 'held'）。
+           和点通知本体是两回事：这里去的是**这个人的主页**，不是那条问题。 */
+        const uid = el.dataset.u;
+        if (!uid) return;
+        closeNotices(); closeMembers();
+        location.hash = '#/u/' + encodeURIComponent(uid);
+        break;
+      }
+
+      case 'toggle-replies': {
+        const id = el.dataset.a;
+        if (expandedReplies.has(id)) expandedReplies.delete(id);
+        else expandedReplies.add(id);
+        /* 只重画当前这一页，**不重新请求数据** —— 折叠纯属本地状态，
+           走 route() 会白跑一次网络，还会把页面滚回顶部。 */
+        if (currentQuestion) renderDetail(currentQuestion);
+        break;
+      }
+
+      case 'reply-to':
+        if (!requireLogin()) return;
+        replyTarget = {
+          answerId: el.dataset.a || '',
+          userId: el.dataset.u || null,
+          name: el.dataset.name || '某人',
+        };
+        if (currentQuestion) renderDetail(currentQuestion);
+        /* 重画之后原来的按钮已经不存在了，所以重新查一次新表单并聚焦，
+           让用户点完就能直接打字（不然还要自己去点输入框）。 */
+        {
+          const ta = $(`.reply-form[data-parent="${replyTarget.answerId}"] textarea`);
+          if (ta) ta.focus();
+        }
+        break;
+
+      case 'reply-cancel':
+        replyTarget = null;
+        if (currentQuestion) renderDetail(currentQuestion);
         break;
 
       case 'close-modal':
@@ -3259,6 +3701,31 @@ document.addEventListener('click', async e => {
         await openProfile();
         break;
 
+      case 'avatar-pick':
+        /* 走隐藏的 <input type=file>：真正的处理在下面的 change 监听里，
+           那样测试可以用 CDP 塞文件、走完整链路，而不是绕过 UI 直接改数据库。 */
+        $('#avatar-file').click();
+        break;
+
+      case 'avatar-reset': {
+        /* 「恢复默认头像」= 把 avatar_url 置回 null。
+           界面自动回落到 avatarOf()（昵称首字 + 颜色），那条 fallback 一直没动过。
+           Storage 里那个文件留着不删：路径是固定的，下次上传会覆盖它；
+           删文件要多一条 delete 权限，换不来什么好处。 */
+        if (!confirm('恢复成默认头像（昵称首字 + 颜色）？')) return;
+        const { error } = await sb.from('profiles').update({ avatar_url: null }).eq('id', me.id);
+        if (error) throw error;
+        me.avatarUrl = null;
+        /* ⚠️ 先把弹窗里那块和顶栏都重画掉，**再**等 route()。
+           不这么做的话，用户点完「恢复默认头像」要等一整轮网络请求（route 会重新拉列表）
+           才看到头像变回来，中间那段时间看起来就像"点了没生效"。 */
+        renderProfileAvatar();
+        renderUserBox();
+        await route();          // 页面里其它地方的头像也跟着换回来
+        toast('已恢复默认头像');
+        break;
+      }
+
       case 'link-github': {
         // 这个按钮是 index.html 里的 <button>，但事件委托拿到的只是 HTMLElement
         const btn = /** @type {HTMLButtonElement} */ (el);
@@ -3310,7 +3777,6 @@ document.addEventListener('click', async e => {
         await route();
         toast('回答已删除');
         break;
-
       case 'retry':
         lastViewedId = null;
         await route();
@@ -3460,6 +3926,14 @@ document.addEventListener('change', async e => {
     } catch (err) {
       toast('插件加载失败：' + err.message);
     }
+  }
+
+  /* 头像文件选择：走**完整**的压缩 → 上传链路（不是直接改 localStorage 糊弄） */
+  if (t.id === 'avatar-file') {
+    const input = /** @type {HTMLInputElement} */ (t);   // .files 只有 input 有
+    const file = input.files && input.files[0];
+    input.value = '';                          // 允许重复选同一个文件
+    if (file) await uploadAvatar(file);
   }
 });
 
@@ -3713,6 +4187,37 @@ document.addEventListener('submit', async e => {
       const ex = explain(err);
       toast(errMsg(ex));
       btn.disabled = false; btn.textContent = '发布回答';
+    }
+    return;
+  }
+
+  /* 回复（挂在某条顶层回答下面，一层平铺）。
+     用 class 而不是 id 认它 —— 一页里每条顶层回答下面都有一个回复框。 */
+  if (form.classList.contains('reply-form')) {
+    e.preventDefault();
+    if (!requireLogin()) return;
+    const body = String(new FormData(form).get('body') || '').trim();
+    if (!body) return;
+
+    const parentId = form.dataset.parent;
+    /* data-to 为空串 = 直接回复这条回答（通知发给回答作者，由触发器兜底） */
+    const to = form.dataset.to || null;
+
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
+    btn.disabled = true; btn.textContent = '发布中…';
+    try {
+      await api.addReply(form.dataset.q, parentId, to, body);
+      form.reset();
+      replyTarget = null;
+      /* 刚发出去的回复必须让人看见：否则它躺在**收起的**列表里，
+         用户会以为"没发出去"然后再发一遍。 */
+      expandedReplies.add(parentId);
+      await route();
+      toast('回复已发布');
+    } catch (err) {
+      const ex = explain(err);
+      toast(errMsg(ex));
+      btn.disabled = false; btn.textContent = '发布回复';
     }
     return;
   }

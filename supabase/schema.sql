@@ -26,6 +26,16 @@ create table if not exists public.profiles (
   created_at   timestamptz not null default now()
 );
 
+-- ⚠️ 头像列**必须加在这里**（第 1 节，表刚建好的地方），不能挪到后面「头像」那一节：
+--    第 7 / 13.5 节的 questions_view / answers_view 要把它塞进 author 那个 jsonb 里，
+--    而视图在那些节就建好了 —— 全新数据库跑脚本时列还不存在会直接报
+--    column p.avatar_url does not exist。
+--    （同类的坑还有 profiles.role、questions.status、answers.edited_at、notifications.note，
+--      见下面第 2/3/10 节的注释。）
+--    注意：值存的是 **Storage 里的公开 URL**（或 null = 用昵称首字自动生成）。
+--    头像本来就是给所有人看的，所以它是公开信息；邮箱 / 真实姓名绝不写进这里。
+alter table public.profiles add column if not exists avatar_url text;
+
 alter table public.profiles enable row level security;
 
 -- 昵称是公开展示的，所有人都能读
@@ -139,8 +149,29 @@ create table if not exists public.answers (
 -- 同上：视图会引用，必须在这里加
 alter table public.answers add column if not exists edited_at timestamptz;
 
+-- 「回复」用的两列（B 站评论那种**一层平铺**的回复，详见第 19 节）：
+--   parent_id          null = 顶层回答；非 null = 这条是挂在某条顶层回答下的回复
+--   reply_to_user_id   这一条是"回复谁"的（只影响显示「回复 @某人」，不影响层级）
+-- ⚠️ 这两列必须加在这里：第 13.5 节的 answers_view 要引用它们。
+alter table public.answers add column if not exists parent_id uuid;
+alter table public.answers add column if not exists reply_to_user_id uuid;
+
+-- 外键用**命名约束 + drop if exists** 的写法而不是 `add column ... references`：
+-- 后者在列已存在时整条语句被跳过，重跑时不会补约束，容易悄悄缺一条。
+--   · 删顶层回答 → 它的回复一起删（on delete cascade）
+--   · 回复人注销 → 只失去"回复谁"的名字，回复本身保留（on delete set null）
+alter table public.answers drop constraint if exists answers_parent_fk;
+alter table public.answers add constraint answers_parent_fk
+  foreign key (parent_id) references public.answers(id) on delete cascade;
+
+alter table public.answers drop constraint if exists answers_reply_to_fk;
+alter table public.answers add constraint answers_reply_to_fk
+  foreign key (reply_to_user_id) references public.profiles(id) on delete set null;
+
 create index if not exists answers_question_idx on public.answers (question_id, created_at);
 create index if not exists answers_author_idx   on public.answers (author_id);
+-- 按顶层回答取它的回复列表 / 数回复条数时走这条
+create index if not exists answers_parent_idx   on public.answers (parent_id, created_at);
 
 alter table public.answers enable row level security;
 
@@ -285,8 +316,11 @@ select
   q.created_at,
   q.views,
   q.accepted_answer_id,
-  jsonb_build_object('id', p.id, 'name', p.display_name) as author,
-  (select count(*) from public.answers a        where a.question_id = q.id)::int as answer_count,
+  jsonb_build_object('id', p.id, 'name', p.display_name, 'avatar_url', p.avatar_url) as author,
+  -- ⚠️ 只数**顶层回答**（parent_id is null）：回复不是「又一个回答」，
+  --    否则一条回答下聊起来，问题卡片上的数字会虚高。见第 13.5 / 19 节。
+  (select count(*) from public.answers a
+    where a.question_id = q.id and a.parent_id is null)::int as answer_count,
   (select count(*) from public.question_votes v where v.question_id = q.id)::int as votes
 from public.questions q
 join public.profiles p on p.id = q.author_id;
@@ -349,6 +383,15 @@ begin
      where id = p_answer_id and question_id = p_question_id
   ) then
     raise exception '这条回答不属于该问题';
+  end if;
+
+  -- ⚠️ 只有**顶层回答**能被选为最佳：回复不是"又一个回答"（见第 19 节）。
+  --    和「回答数只数顶层」是同一条规则的两面 —— 一条规则要在所有出入口都拦住。
+  if exists (
+    select 1 from public.answers
+     where id = p_answer_id and parent_id is not null
+  ) then
+    raise exception '回复不能被选为最佳答案，请选一条顶层回答';
   end if;
 
   -- 再点一次同一个回答 = 取消
@@ -459,6 +502,13 @@ as $$
 declare
   v_asker uuid;
 begin
+  -- ⚠️ 只对**顶层回答**发「有人回答了你的问题」。
+  --    回复走下面的 notify_on_reply：回复是聊给"被回复的那个人"的，
+  --    不是给提问者的；不写这一句，每发一条回复提问者都会被吵一次。
+  if new.parent_id is not null then
+    return new;
+  end if;
+
   select author_id into v_asker from public.questions where id = new.question_id;
   -- 自己回答自己的问题不用通知
   if v_asker is not null and v_asker <> new.author_id then
@@ -473,6 +523,44 @@ drop trigger if exists on_answer_created on public.answers;
 create trigger on_answer_created
   after insert on public.answers
   for each row execute function public.notify_on_answer();
+
+-- 有人**回复**你的回答 / 回复时：通知"被回复的那个人"（不是提问者）。
+-- 收件人取 coalesce(reply_to_user_id, 那层回答的作者)：
+--   · 在 B 站式的一层平铺里，「回复 @某人」指的就是 reply_to_user_id
+--   · 直接 REST 插入、没带 reply_to_user_id 时，退化成通知那条顶层回答的作者
+-- 自己回复自己不通知（和 notify_on_answer 同一条规矩）。
+-- 通知里的 answer_id 指向这条回复本身，所以删掉回复时通知会一起级联清掉。
+create or replace function public.notify_on_reply()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_parent_author uuid;
+  v_target        uuid;
+begin
+  if new.parent_id is null then
+    return new;                       -- 顶层回答走 notify_on_answer
+  end if;
+
+  select author_id into v_parent_author
+    from public.answers where id = new.parent_id;
+
+  v_target := coalesce(new.reply_to_user_id, v_parent_author);
+
+  if v_target is not null and v_target <> new.author_id then
+    insert into public.notifications (user_id, actor_id, type, question_id, answer_id, note)
+    values (v_target, new.author_id, 'reply', new.question_id, new.id, left(new.body, 80));
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_reply_created on public.answers;
+create trigger on_reply_created
+  after insert on public.answers
+  for each row execute function public.notify_on_reply();
 
 create or replace function public.notify_on_accept()
 returns trigger
@@ -753,18 +841,20 @@ grant select on public.view_history_view to authenticated;
 
 
 -- ---------------------------------------------------------------------------
--- 13.4 通知：加两种类型 + 一个说明字段
---      'removed' = 问题被管理者删除
+-- 13.4 通知：加几种类型 + 一个说明字段
+--      'removed' = 问题/回答被管理者删除
 --      'remind'  = 管理者提醒（比如提醒整理标签）
+--      'reply'   = 有人回复了你的回答（见第 10.3 节的 notify_on_reply）
 -- ---------------------------------------------------------------------------
 alter table public.notifications add column if not exists note text;
 
 alter table public.notifications drop constraint if exists notifications_type_check;
 alter table public.notifications add constraint notifications_type_check
-  check (type in ('answer', 'accept', 'removed', 'remind'));
+  check (type in ('answer', 'accept', 'removed', 'remind', 'reply'));
 
--- 通知视图：补上 note、actor 的角色（前端要显示"管理员"徽章）
+-- 通知视图：补上 note、actor 的角色和头像（前端要显示"管理员"徽章 / 头像）
 -- ⚠️ note 必须**追加在最后面**：create or replace view 不允许在中途插列
+--    （avatar_url 是塞进 actor 那个 jsonb 里的，不改视图的列清单，所以不受这条限制）
 create or replace view public.notifications_view
 with (security_invoker = on) as
 select
@@ -774,7 +864,8 @@ select
   n.created_at,
   n.question_id,
   n.answer_id,
-  jsonb_build_object('id', a.id, 'name', a.display_name, 'role', a.role) as actor,
+  jsonb_build_object('id', a.id, 'name', a.display_name, 'role', a.role,
+                     'avatar_url', a.avatar_url) as actor,
   q.title as question_title,
   n.note
 from public.notifications n
@@ -783,7 +874,7 @@ left join public.questions q on q.id = n.question_id;
 
 
 -- ---------------------------------------------------------------------------
--- 13.5 视图补上作者角色 + 状态 + author_id
+-- 13.5 视图补上作者角色 + 状态 + author_id（+ 头像，见第 20 节）
 --      注意：create or replace view **不允许**改列顺序或在中途插列，
 --      所以这里先 drop 再 create，建完要重新授权（grant 会跟着 drop 一起没）。
 -- ---------------------------------------------------------------------------
@@ -798,8 +889,12 @@ select
   q.created_at,
   q.views,
   q.accepted_answer_id,
-  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
-      (select count(*) from public.answers a        where a.question_id = q.id)::int as answer_count,
+  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role,
+                     'avatar_url', p.avatar_url) as author,
+  -- ⚠️ 回答数**只数顶层**（parent_id is null）：回复不是"又一个回答"。
+  --    不这么写的话，一条回答下聊十句，列表卡片上就多十个"回答"。
+  (select count(*) from public.answers a
+    where a.question_id = q.id and a.parent_id is null)::int as answer_count,
   (select count(*) from public.question_votes v where v.question_id = q.id)::int as votes,
   q.status,
   q.author_id,
@@ -809,6 +904,10 @@ join public.profiles p on p.id = q.author_id;
 
 grant select on public.questions_view to anon, authenticated;
 
+-- ⚠️ 这张视图同时返回**顶层回答和回复**（前端按 parent_id 分组）：
+--    一次查询就能把详情页要的东西全拿到，不用 N+1。
+--    parent_id = null → 顶层回答；非 null → 挂在它下面的回复。
+--    reply_to 是"回复 @某人"里的那个人（可能为 null：直接回复顶层回答时）。
 drop view if exists public.answers_view;
 create view public.answers_view
 with (security_invoker = on) as
@@ -817,13 +916,22 @@ select
   a.question_id,
   a.body,
   a.created_at,
-  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role) as author,
+  jsonb_build_object('id', p.id, 'name', p.display_name, 'role', p.role,
+                     'avatar_url', p.avatar_url) as author,
   (select count(*) from public.answer_votes v where v.answer_id = a.id)::int as votes,
   (select q.title from public.questions q where q.id = a.question_id) as question_title,
   a.author_id,
-  a.edited_at
+  a.edited_at,
+  a.parent_id,
+  a.reply_to_user_id,
+  -- 顶层回答用 case 保证"没有回复对象"时返回 SQL null，而不是 {"id":null,...}
+  -- —— 前端只要判断 reply_to 是不是 null 就够了，不用再读里面的 id。
+  case when rt.id is null then null
+       else jsonb_build_object('id', rt.id, 'name', rt.display_name,
+                               'role', rt.role, 'avatar_url', rt.avatar_url) end as reply_to
 from public.answers a
-join public.profiles p on p.id = a.author_id;
+join public.profiles p  on p.id  = a.author_id
+left join public.profiles rt on rt.id = a.reply_to_user_id;
 
 grant select on public.answers_view to anon, authenticated;
 
@@ -1081,9 +1189,14 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 14.2 权限收窄：只公开这几列，真名相关的不给
 --      （角色 role 仍然只读，改角色只能走 set_user_role 函数）
+--      avatar_url 是**故意公开**的：头像本来就是要展示给所有人看的
+--      （Storage 桶也是 public，拿到 URL 就能看）—— 但除了头像以外，
+--      这里不放开任何一列；邮箱 / 真实姓名照旧不给。
+--      ⚠️ 必须把 avatar_url 列进来：第 13.5 节的视图是 security_invoker=on，
+--         它们以调用者的权限读 profiles，少这一列会让 questions_view 直接报权限错。
 -- ---------------------------------------------------------------------------
 revoke select on public.profiles from anon, authenticated;
-grant select (id, display_name, role, created_at) on public.profiles to anon, authenticated;
+grant select (id, display_name, role, created_at, avatar_url) on public.profiles to anon, authenticated;
 
 -- 自己能改的列：昵称可以**直接**改（没有跨年语义）。
 -- ⚠️ 真名 / 参赛年数必须走 update_profile() 函数，不能直接改：
@@ -1137,7 +1250,9 @@ drop function if exists public.my_profile();
 create function public.my_profile()
 returns table (
   id uuid, display_name text, real_name text,
-  comp_years int, comp_years_set_year int, role text
+  comp_years int, comp_years_set_year int, role text,
+  -- 头像（公开 URL），null = 用昵称首字自动生成。放最后，方便以后继续加列。
+  avatar_url text
 )
 language sql
 security definer
@@ -1149,7 +1264,8 @@ as $$
          p.real_name,
          public.comp_years_effective(p.comp_years, p.comp_years_set_year),
          p.comp_years_set_year,
-         p.role
+         p.role,
+         p.avatar_url
     from public.profiles p
    where p.id = auth.uid();
 $$;
@@ -1230,7 +1346,9 @@ returns table (
   questions_this_week int,
   answers_this_week   int,
   questions_total     int,
-  answers_total       int
+  answers_total       int,
+  -- 头像（公开 URL），null = 前端回退到"昵称首字 + 名字算出来的颜色"
+  avatar_url          text
 )
 language plpgsql
 security definer
@@ -1261,11 +1379,18 @@ begin
       (select count(*) from public.questions q
         where q.author_id = p.id
           and q.created_at >= date_trunc('week', now()))::int,
+      -- ⚠️ 回答统计**只数顶层回答**：回复不算是"又一个回答"，
+      --    否则成员目录的"本周回答 / 累计回答"会和问题卡片上的回答数对不上。
+      --    （回复是聊天性质的互动，不是一份独立回答 —— 这条口径要和
+      --      questions_view.answer_count 保持一致。）
       (select count(*) from public.answers a
         where a.author_id = p.id
+          and a.parent_id is null
           and a.created_at >= date_trunc('week', now()))::int,
       (select count(*) from public.questions q where q.author_id = p.id)::int,
-      (select count(*) from public.answers   a where a.author_id = p.id)::int
+      (select count(*) from public.answers   a
+        where a.author_id = p.id and a.parent_id is null)::int,
+      p.avatar_url
     from public.profiles p
    order by p.created_at;
 end;
@@ -1463,6 +1588,12 @@ grant execute on function public.set_question_tags(uuid, text[]) to authenticate
 -- 16.2 管理者删除**回答**
 --      和删问题一样的规矩（管得到作者才让删），也会先给作者发一条带理由的通知。
 --      通知里 question_id 故意留空，否则回答一删通知会被级联删掉。
+--
+--      ⚠️ 回复也是 answers 表里的一行，所以这个函数同样管删回复：
+--         · 删**顶层回答** → 它下面的回复由外键 on delete cascade 一起删掉
+--           （那些回复的作者**不会**各自收到通知，通知只发给被删这条的作者）
+--         · 删**单条回复** → 只有那一条消失，顶层回答和别的回复都不动
+--         理由文案按"回答 / 回复"分别写，免得作者收到通知一头雾水。
 -- ---------------------------------------------------------------------------
 create or replace function public.admin_delete_answer(p_answer_id uuid, p_reason text default null)
 returns void
@@ -1471,13 +1602,14 @@ security definer
 set search_path = public
 as $$
 declare
-  v_author uuid;
-  v_title  text;
+  v_author   uuid;
+  v_title    text;
+  v_is_reply boolean;
 begin
   if auth.uid() is null then raise exception '请先登录'; end if;
 
-  select a.author_id, q.title
-    into v_author, v_title
+  select a.author_id, q.title, (a.parent_id is not null)
+    into v_author, v_title, v_is_reply
     from public.answers a
     left join public.questions q on q.id = a.question_id
    where a.id = p_answer_id;
@@ -1490,7 +1622,8 @@ begin
   values (
     v_author, auth.uid(), 'removed', null,
     coalesce(nullif(trim(p_reason), ''), '内容不符合规范') ||
-    '｜你在《' || coalesce(v_title, '已删除的问题') || '》下的回答'
+    '｜你在《' || coalesce(v_title, '已删除的问题') || '》下的' ||
+    case when v_is_reply then '一条回复' else '回答' end
   );
 
   delete from public.answers where id = p_answer_id;
@@ -1625,3 +1758,226 @@ end;
 $$;
 
 grant execute on function public.kick_member(uuid) to authenticated;
+
+
+-- ============================================================================
+-- 19. 回复：B 站评论式的一层平铺
+--
+--     用户明确要的是「B 站那种」。B 站评论的实现是**一层平铺**，不是无限嵌套：
+--       · 一条顶层回答下面挂着它的回复列表
+--       · 回复某人时显示「回复 @某人：」，但**仍然平铺在同一层**，不缩进
+--       · 有「展开 N 条回复 / 收起」的折叠，按时间**正序**（先回复的在前）
+--
+--     所以数据结构是两列，而不是一张新表：
+--       answers.parent_id        null = 顶层回答；非 null = 挂在某条顶层回答下的回复
+--       answers.reply_to_user_id 这一条"回复谁"——只影响显示，**不影响层级**
+--     （两列本身加在第 3 节，因为第 13.5 节的 answers_view 要引用它们）
+--
+--     ⚠️ 为什么**必须**在数据库层保证"只有一层"：
+--         前端只会在点击「回复」时把 parent_id 写成顶层回答的 id —— 但那是前端约束。
+--         任何人拿 publishable key 直接打 REST，都能给一条回复再挂一条回复，
+--         几天后就是一棵嵌套树，详情页的渲染逻辑、回答计数、通知全都对不上。
+--         所以这里用触发器把规则钉死在数据库里（这个项目一贯的原则：前端不是权限）。
+--
+--     连带影响（都在本文件里改掉了，改规则时记得一起看）：
+--       · questions_view.answer_count / weekly_stats 只数顶层（第 13.5 / 14.5 节）
+--       · accept_answer 拒绝把回复选为最佳（第 8.1 节）
+--       · 删顶层回答 → 回复级联删除（第 3 节的 answers_parent_fk on delete cascade）
+--       · notify_on_answer 只对顶层发通知；回复走 notify_on_reply（第 10.3 节）
+--       · 回复的删除权限和回答完全一致 —— 它就在 answers 表里，
+--         第 13 节的「回答：本人或管理者可删」那条 RLS 自动覆盖回复，不用另写
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 19.1 唯一的层级约束（数据库层的闸门，不是前端约定）
+-- ---------------------------------------------------------------------------
+create or replace function public.enforce_one_level_reply()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_parent_parent uuid;
+  v_parent_q      uuid;
+  v_parent_author uuid;
+begin
+  -- 顶层回答：把「回复谁」清掉（那是回复才有的字段），直接放行
+  if new.parent_id is null then
+    new.reply_to_user_id := null;
+    return new;
+  end if;
+
+  -- 自己不能是自己的父亲（自引用会让级联删除变成环）
+  if new.id is not null and new.parent_id = new.id then
+    raise exception '不能把一条回答挂在它自己下面';
+  end if;
+
+  select a.parent_id, a.question_id, a.author_id
+    into v_parent_parent, v_parent_q, v_parent_author
+    from public.answers a
+   where a.id = new.parent_id;
+
+  if not found then
+    raise exception '要回复的那条回答不存在';
+  end if;
+
+  -- ★ 核心规则：父必须是一条**顶层回答**（parent_id is null）。
+  --   回复的回复 → 直接报错，而不是悄悄挂到祖父上 —— 静默改写会让用户以为成功。
+  if v_parent_parent is not null then
+    raise exception '只支持一层回复：不能回复一条回复，请回复它所属的那条回答';
+  end if;
+
+  -- 回复必须和父在同一条问题下，否则详情页永远查不到它
+  if v_parent_q <> new.question_id then
+    raise exception '回复必须和它所属的回答在同一条问题下';
+  end if;
+
+  -- 「回复 @某人」里的那个人必须真的是**这条回答的作者**或**同一层里回复过的人**。
+  -- 不校验的话，任何登录用户都能把 reply_to_user_id 填成任意受害者，
+  -- 借 notify_on_reply 给他发一条"有人回复了你"的通知 —— 那就是一个伪造通知的入口。
+  -- （通知只能由触发器写入，这里必须保证触发器的输入是可信的。）
+  if new.reply_to_user_id is not null
+     and new.reply_to_user_id <> v_parent_author
+     and not exists (
+       select 1 from public.answers r
+        where r.parent_id = new.parent_id
+          and r.author_id = new.reply_to_user_id
+     ) then
+    raise exception '「回复谁」只能是这条回答的作者，或同一层里回复过的人';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists on_answer_one_level on public.answers;
+create trigger on_answer_one_level
+  before insert or update on public.answers
+  for each row execute function public.enforce_one_level_reply();
+
+
+-- ---------------------------------------------------------------------------
+-- 19.2 自检：顶层回答 / 回复各有多少条（顺便确认没有出现二级嵌套）
+--      正常应该看到「嵌套的回复数 = 0」
+-- ---------------------------------------------------------------------------
+select
+  count(*) filter (where parent_id is null)     as 顶层回答,
+  count(*) filter (where parent_id is not null) as 回复,
+  count(*) filter (
+    where parent_id is not null
+      and parent_id in (select id from public.answers where parent_id is not null)
+  ) as 嵌套的回复_应该为0
+from public.answers;
+
+
+-- ============================================================================
+-- 20. 头像（上传自定义图片 + 没上传时回退到自动生成）
+--
+--     设计：
+--       · profiles.avatar_url 存 **Storage 里的公开 URL**（null = 没有自定义头像）。
+--         列加在第 1 节（视图会引用它），这里只放桶、策略和授权。
+--       · 桶是 **public** 的：头像本来就是要展示给所有人看的，
+--         所以"拿到 URL 就能看"是正常语义，不是漏洞。
+--         ⚠️ 正因为公开，**绝不能**把 avatar_url 之外的个人信息写进这个桶
+--            （尤其是邮箱、真实姓名）—— 真实姓名的可见性规则仍是「组员及以上」，
+--            不因为做头像而放宽（见第 14 节的隐私设计）。
+--       · 上传路径规定为 `<user_id>/avatar.png`：**以 user_id 开头**，
+--         RLS 才能表达"只有本人能改自己目录下的文件"（靠 storage.foldername）。
+--       · 客户端会先把图片压到 128×128 再传（手机随手拍几 MB 的照片，
+--         直接传又慢又占空间，而显示的地方最大也就几十像素）。
+--         压缩是**体验**；下面桶的大小/类型限制和 Storage 策略才是**边界**。
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 20.1 建桶（幂等：重跑只是把配置改回正确值，不会清掉里面的文件）
+--      `insert ... on conflict do update` 而不是 do nothing ——
+--      万一有人把它改成 private，重跑脚本要能修回来。
+-- ---------------------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do update set public = true;
+
+-- 桶级的大小 / 类型上限（更强的一道，绕不过）：
+-- 用 DO 包一层是因为 file_size_limit / allowed_mime_types 是后来加的列，
+-- 老项目的 storage.buckets 上可能没有 —— 有就设，没有就跳过并说一声，
+-- 不要因为一个可选配置让整份脚本跑失败。
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'storage' and table_name = 'buckets'
+       and column_name = 'file_size_limit'
+  ) then
+    update storage.buckets
+       set file_size_limit    = 5242880,   -- 5MB（客户端上传前压到 128×128，远小于这个）
+           allowed_mime_types = array['image/png', 'image/jpeg', 'image/webp']
+     where id = 'avatars';
+  else
+    raise notice 'storage.buckets 没有 file_size_limit 列（旧版 Supabase）：跳过桶级限制，客户端仍会挡';
+  end if;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 20.2 Storage 的 RLS 策略（storage.objects）
+--      · 所有人可读 avatars 桶（public 桶的公开 URL 本来就不校验，这里补上 API 那条路）
+--      · 写（insert / update / delete）**只允许本人**，且路径必须以自己的 user_id 开头
+--      路径形如 `<user_id>/avatar.png` → storage.foldername(name) = {<user_id>}
+-- ---------------------------------------------------------------------------
+drop policy if exists "头像：所有人可读" on storage.objects;
+create policy "头像：所有人可读" on storage.objects
+  for select using (bucket_id = 'avatars');
+
+drop policy if exists "头像：本人可传" on storage.objects;
+create policy "头像：本人可传" on storage.objects
+  for insert to authenticated
+  with check (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+    and lower(storage.extension(name)) in ('png', 'jpg', 'jpeg', 'webp')
+  );
+
+drop policy if exists "头像：本人可换" on storage.objects;
+create policy "头像：本人可换" on storage.objects
+  for update to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  )
+  with check (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+    and lower(storage.extension(name)) in ('png', 'jpg', 'jpeg', 'webp')
+  );
+
+drop policy if exists "头像：本人可删" on storage.objects;
+create policy "头像：本人可删" on storage.objects
+  for delete to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- ⚠️ 关于 "storage.objects 的 grant"：Supabase 建项目时已经给
+--    anon / authenticated 授过 storage.objects 的权限，靠上面这些 policy 做行级过滤，
+--    所以这里**不再重复 grant**（重复 grant 在某些项目上会因为当前角色没有 grant option
+--    而让整份脚本失败）。真正拦人的是 policy，不是 grant。
+
+-- ---------------------------------------------------------------------------
+-- 20.3 允许本人直接改 avatar_url 这一列
+--      13/14.2 节把 profiles 的 update 收窄成了"只能改 display_name"，
+--      所以这里要为头像再放开一列（列级授权，仍然改不了 role / real_name / comp_years）。
+--      "恢复默认头像" = 把 avatar_url 置回 null，走的就是这条直改。
+-- ---------------------------------------------------------------------------
+grant update (avatar_url) on public.profiles to authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 20.4 自检：有多少人设了自定义头像
+-- ---------------------------------------------------------------------------
+select
+  count(*)                                              as 总人数,
+  count(*) filter (where avatar_url is not null)        as 有自定义头像,
+  count(*) filter (where avatar_url is null)            as 用自动生成
+from public.profiles;
+

@@ -9,6 +9,15 @@
 import { connect, check, summary, checkNoJsErrors, waitFor } from './lib/cdp.mjs';
 
 const s = await connect();
+/* 导航记录带 unreachableUrl（说明见 check-oauth.mjs）：出口代理偶发把外站连接
+   掐成 chrome-error://，那时应用其实已经跳对了，只是 GitHub 没加载出来。 */
+const navigations = [];
+s.on('Page.frameNavigated', p => {
+  if (!p.frame.parentId) navigations.push({ url: p.frame.url, unreachable: p.frame.unreachableUrl || '' });
+});
+const wentToGithub = () =>
+  navigations.some(n => (n.url + ' ' + n.unreachable).includes('github.com'));
+
 await s.boot();
 
 /* 打开 登录 → 忘记密码 */
@@ -47,10 +56,11 @@ await waitFor(async () => s.shown('#reset-mask'), 10000);
 const before = await s.ev('location.href');
 await s.ev(`document.querySelector('[data-action="forgot-use-github"]').click()`);
 const jumped = await waitFor(async () => (await s.ev('location.href')) !== before, 15000);
-if (jumped) await waitFor(async () => (await s.ev('location.href')).includes('github.com'), 15000);
+if (jumped) await waitFor(async () => wentToGithub(), 15000);
+const hit = navigations.find(n => (n.url + ' ' + n.unreachable).includes('github.com'));
 check('点「改用 GitHub 登录」跳到了 GitHub',
-  jumped && (await s.ev('location.href')).includes('github.com'),
-  jumped ? (await s.ev('location.href')).slice(0, 90) : '地址没有变化');
+  jumped && wentToGithub(),
+  hit ? (hit.url.startsWith('chrome-error') ? hit.unreachable : hit.url).slice(0, 90) : '地址没有变化');
 
 checkNoJsErrors(s.jsErrors);
 s.close();

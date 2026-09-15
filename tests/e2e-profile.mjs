@@ -16,6 +16,22 @@ const { email, pass } = needCreds('端到端用例');
 const TITLE = '【自动化测试】这条问题应该会被自动删掉';
 
 const s = await connect();
+/* —— 临时性能探针：把连接对象上耗时的方法都包一层，打印每步耗时（>300ms） —— */
+{
+  const T0 = Date.now();
+  const wrap = name => {
+    const orig = s[name].bind(s);
+    s[name] = async (...a) => {
+      const t = Date.now();
+      const r = await orig(...a);
+      const dt = Date.now() - t;
+      if (dt > 300) console.log(`   [profile] ${name} ${dt}ms  (t=${((Date.now()-T0)/1000).toFixed(1)}s)`);
+      return r;
+    };
+  };
+  ['navigate', 'reload', 'waitApp', 'waitData', 'waitFor', 'login', 'openProfile', 'logout', 'openAuth'].forEach(wrap);
+}
+
 
 let qid = null;
 let myId = null;

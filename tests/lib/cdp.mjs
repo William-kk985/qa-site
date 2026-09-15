@@ -150,10 +150,12 @@ async function attach(page) {
   };
 
   /* 探活：僵尸标签页 WebSocket 连得上，却永远不回命令，只靠 onopen 判断不出来。 */
+  let probeTimer;
   const alive = await Promise.race([
     send('Runtime.enable').then(() => true, () => false),
-    sleep(4000).then(() => false),
+    new Promise(r => { probeTimer = setTimeout(() => r(false), 4000); }),
   ]);
+  clearTimeout(probeTimer);   // 探通了就别留着这个 4 秒定时器（见 once() 那段注释）
   if (!alive) {
     try { ws.close(); } catch (_) { /* 已经断了就算了 */ }
     throw new Error('命令超时没响应');
@@ -175,11 +177,21 @@ async function attach(page) {
     listeners.get(method).push(fn);
   };
 
-  /* 一次性等某个 CDP 事件；超时返回 false，交给上层判断。 */
+  /* 一次性等某个 CDP 事件；超时返回 false，交给上层判断。
+
+     ⚠️ 事件先到时必须 clearTimeout —— 这个定时器以前没人清，而 Node 的进程
+     生命周期是「还有未触发的定时器就不退出」。于是每个脚本干完活之后，
+     进程还要**空等到这个 20 秒定时器烧完**才退出。表现就是：
+     明明只跑 2 秒的用例，run-all 里一律显示 20 秒 —— 那个「固定 20 秒地板」
+     就是这么来的（实测：探针内部合计 1.94s，墙钟 20.20s）。
+     清掉它不改变任何等待语义（该等的事件照样等、该超时照样超时），
+     只是不再让一个已经作废的定时器把进程吊在那儿。 */
   const once = (method, timeoutMs = 20000) => new Promise(resolve => {
     let settled = false;
-    on(method, () => { if (!settled) { settled = true; resolve(true); } });
-    setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, timeoutMs);
+    let timer = null;
+    const done = v => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+    on(method, () => done(true));
+    timer = setTimeout(() => done(false), timeoutMs);
   });
 
   const txt = sel => ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); return e ? e.innerText : ''; })()`);
@@ -188,8 +200,32 @@ async function attach(page) {
   const count = sel => ev(`document.querySelectorAll(${JSON.stringify(sel)}).length`);
 
   /* 等整页 load 事件，而不是 sleep 一个拍脑袋的毫秒数。
-     注意不能只看 document.readyState：Page.navigate 刚发出时旧文档还是 complete。 */
+     注意不能只看 document.readyState：Page.navigate 刚发出时旧文档还是 complete。
+
+     ⚠️ 这里必须先分清「这次导航换不换文档」——这是套件里第二个、也是更大的时间陷阱：
+     `Page.navigate` 到**只差 fragment** 的地址（`#/q/a` → `#/q/b`）是 same-document
+     导航，浏览器只会发一个 hashchange，**永远不发 loadEventFired**。原来的实现在这里
+     白等满超时（实测每一次 20.1 秒），而且页面根本没重载 —— 路由对不对全靠页面自己的
+     hashchange 处理器，时序上并不保证。
+     地址完全相同时同理（发出去的是一次 reload 语义的导航）。
+     所以：同文档 → 显式 reload 一次，拿到一份干净文档（保持「navigate 就是重新加载」
+     这个约定），也把 20 秒省掉；真换文档 → 照旧等 loadEventFired。 */
   const navigate = async (url, { timeout = 20000 } = {}) => {
+    const kind = await ev(`(() => {
+      try {
+        const a = new URL(location.href), b = new URL(${JSON.stringify(url)}, location.href);
+        if (a.href === b.href) return 'same';
+        if (a.origin === b.origin && a.pathname === b.pathname && a.search === b.search) return 'fragment';
+        return 'load';
+      } catch (e) { return 'load'; }
+    })()`);
+    if (kind === 'same') return reload({ timeout });
+    if (kind === 'fragment') {
+      const within = once('Page.navigatedWithinDocument', timeout);
+      await send('Page.navigate', { url });
+      await within;
+      return reload({ timeout });     // 地址已经换过去了，再真刷一次
+    }
     const loaded = once('Page.loadEventFired', timeout);
     await send('Page.navigate', { url });
     await loaded;
@@ -253,14 +289,36 @@ async function attach(page) {
     send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
 
   /* 统一的「从干净状态开始」：清掉上一轮残留的登录态，否则顶栏没有「登录 / 注册」
-     按钮，点击就会撞 null（脚本单独跑没事，run-all 连着跑必炸）。 */
-  const boot = async ({ clear = true, waitLogin = true, timeout = 20000 } = {}) => {
-    await navigate(BASE, { timeout });
-    await waitApp(timeout);
-    if (clear) {
-      await ev('localStorage.clear()');
-      await reload({ timeout });
+     按钮，点击就会撞 null（脚本单独跑没事，run-all 连着跑必炸）。
+
+     ⚠️ 两个刻意的设计，都是踩过坑之后改的：
+
+     ① 清 localStorage 用「文档创建时注入」而不是「navigate → clear → reload」。
+        原来那是**两次整页加载**（第二次纯粹为了清干净重来）。而每页都要跑一遍
+        app.js 首屏（会话、问题列表、资料…），是脚本开头的主要成本。
+        注入的脚本在任何页面脚本之前执行，所以 app.js 读到的就是干净存储；
+        清完立刻把注入撤掉 —— 后面的 reload 必须保留登录态 / 主题 / 插件，
+        不能每次都清。
+
+     ② 每次 boot 都把视口重置成一个固定值。上一个用例可能留下
+        Emulation override（踩过：残留 780px 视口让「页面宽度=1240px」假失败），
+        重置之后每个脚本的起手几何都一样，「干净起手才过」的偶发失败就没了。
+        需要别的尺寸的用例（比如验 1240px 宽度）在 boot 之后自己 setViewport。 */
+  const boot = async ({ clear = true, waitLogin = true, timeout = 20000, viewport = [1280, 900] } = {}) => {
+    if (viewport) await setViewport(viewport[0], viewport[1]);
+    if (!clear) {
+      await navigate(BASE, { timeout });
       await waitApp(timeout);
+    } else {
+      const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', {
+        source: 'try { localStorage.clear(); } catch (e) {}',
+      });
+      try {
+        await navigate(BASE, { timeout });
+        await waitApp(timeout);
+      } finally {
+        await send('Page.removeScriptToEvaluateOnNewDocument', { identifier }).catch(() => {});
+      }
     }
     if (waitLogin) {
       const ok = await waitFor(async () => ev(`!!document.querySelector('[data-action="login"]')`), timeout);
