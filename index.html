@@ -88,7 +88,7 @@
         <input name="display_name" maxlength="16" placeholder="例如：小明" autocomplete="nickname">
       </label>
       <label class="field signup-only">
-        <span class="field-label">真实姓名（只有管理者看得到）</span>
+        <span class="field-label">真实姓名（组员及以上可见）</span>
         <input name="real_name" maxlength="20" placeholder="例如：张三" autocomplete="name">
       </label>
       <label class="field">
@@ -125,7 +125,7 @@
         <input name="display_name" maxlength="16" required placeholder="例如：小明">
       </label>
       <label class="field">
-        <span class="field-label">真实姓名（只有管理者看得到）</span>
+        <span class="field-label">真实姓名（组员及以上可见）</span>
         <input name="real_name" maxlength="20" placeholder="例如：张三" autocomplete="name">
       </label>
       <label class="field">
@@ -206,7 +206,7 @@
   </div>
 </div>
 
-<!-- 成员管理（只有大管理者能打开） -->
+<!-- 成员目录（所有登录用户都能打开；改角色 / 踢人 / 群发提醒仍只有对应层级可见） -->
 <div class="modal-mask hidden" id="members-mask">
   <div class="modal modal-wide">
     <div class="modal-head">
@@ -218,7 +218,8 @@
       </div>
     </div>
     <p class="modal-sub">
-      本周 = 从周一算起。真实姓名只有管理者看得到；「普通用户 / 管理者 / 大管理者」三个按钮只有大管理者能点。
+      本周 = 从周一算起。真实姓名「组员及以上」可见；邮箱不展示、也不能搜索。
+      改角色的按钮只有大管理者能点。
     </p>
 
     <div class="member-toolbar">
@@ -239,6 +240,18 @@
           <option value="2">≥ 2 年</option>
           <option value="3">≥ 3 年</option>
         </select>
+      </label>
+      <label>身份
+        <select id="member-role">
+          <option value="all">全部</option>
+          <option value="user">普通用户</option>
+          <option value="member">组员</option>
+          <option value="admin">管理者</option>
+          <option value="super_admin">大管理者</option>
+        </select>
+      </label>
+      <label>名字
+        <input id="member-name" type="search" placeholder="昵称或真名" autocomplete="off">
       </label>
     </div>
     <div class="member-list" id="member-list"></div>

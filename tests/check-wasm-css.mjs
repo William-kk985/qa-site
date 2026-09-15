@@ -54,13 +54,25 @@ check('CSS 真的生效了（卡片圆角跟着变）', d.cardRadius === '9px', 
 check('CSS 真的生效了（主按钮底色不再是站点默认色）',
   d.btnBg && d.btnBg !== 'rgb(79, 70, 229)', d.btnBg);
 
-/* 反证：WASM 自己碰不到 DOM —— 导出表里只有函数，没有任何 DOM 入口 */
-const noDom = await s.ev(`(async () => {
+/* 反证：WASM 自己碰不到 DOM —— 导出表里只有约定 ABI 的名字，
+   没有任何浏览器对象（document / window / fetch …）。
+   ⚠️ 别写死成某几个导出名：插件 ABI 会加东西（比如字符串搜索加的
+      search_score + qa_buffer + memory），写死了每次加功能都要改这里。
+      换成"白名单 + 类型检查"就不会因为加一个合法导出而假失败。 */
+const ABI_EXPORTS = ['theme', 'hot_score', 'search_score', 'qa_buffer', 'memory'];
+const info = JSON.parse(await s.ev(`(async () => {
   const bytes = await (await fetch('plugins/prebuilt/moonbit.wasm')).arrayBuffer();
   const { instance } = await WebAssembly.instantiate(bytes, {});
-  return JSON.stringify(Object.keys(instance.exports).sort());
-})()`);
-check('WASM 实例的导出里只有函数，没有任何 DOM 入口', noDom === '["hot_score","theme"]', noDom);
+  const kinds = {};
+  for (const [k, v] of Object.entries(instance.exports)) {
+    kinds[k] = v instanceof WebAssembly.Memory ? 'memory' : typeof v;
+  }
+  return JSON.stringify(kinds);
+})()`));
+check('WASM 导出表只有约定 ABI 的名字（没有 DOM 入口）',
+  Object.keys(info).every(k => ABI_EXPORTS.includes(k)), Object.keys(info).sort().join(','));
+check('导出里没有浏览器对象（全是函数 / 自己的线性内存）',
+  Object.values(info).every(t => t === 'function' || t === 'memory'), JSON.stringify(info));
 
 checkNoJsErrors(s.jsErrors);
 s.close();

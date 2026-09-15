@@ -61,6 +61,8 @@ const ROLE_LABEL = {
 const ROLE_LEVEL = { user: 1, member: 2, admin: 3, super_admin: 4 };
 /** 「至少是管理者」的层级。别写死数字，加层级时只改 ROLE_LEVEL 一处。 */
 const ADMIN_LEVEL = ROLE_LEVEL.admin;
+/** 「至少是组员」的层级 —— 真名从这一档起才给（见 weekly_stats 里的判断）。 */
+const MEMBER_LEVEL = ROLE_LEVEL.member;
 
 const levelOf = u => ROLE_LEVEL[(u && u.role) || 'user'] || 1;
 const myLevel = () => ROLE_LEVEL[(me && me.role) || 'user'] || 1;
@@ -155,7 +157,8 @@ let notices = [];           // 站内通知（只有自己看得到）
 let identities = [];        // 当前账号绑定了哪些登录方式
 let myAnswers = [];         // 我回答过的（「我的」页面）
 let myViews = [];           // 最近 30 天的浏览记录
-let members = [];           // 成员列表（大管理者面板）
+let userAnswers = [];       // 正在看的**别人**的回答（#/u/<id> 主页）
+let members = [];           // 成员目录（所有登录用户可看）
 let currentQuestion = null; // 当前正在看的问题（编辑时要从这里取原文）
 
 /* ============================================================================
@@ -736,7 +739,12 @@ function renderSnippets() {
   fill('#css-snippets', CSS_SNIPPETS, 'css');
   fill('#js-snippets', JS_SNIPPETS, 'js');
 }
-const ui = { filter: 'new', tag: null, q: '', meTab: 'questions', memberSort: 'week', memberYears: 'all', themeTab: 'basic' };
+/* memberRole / memberName 是成员目录的两个筛选维度（身份 / 名字）；
+   参赛年数用 memberYears。三个维度都是纯前端筛选，不改数据库。 */
+const ui = {
+  filter: 'new', tag: null, q: '', meTab: 'questions', themeTab: 'basic',
+  memberSort: 'week', memberYears: 'all', memberRole: 'all', memberName: '',
+};
 let lastViewedId = null;
 let authMode = 'login';
 
@@ -861,11 +869,16 @@ const api = {
   },
 
   /* ---- 「我的」页面 ---- */
-  async listMyAnswers() {
+  /* 某个人的回答（自己或别人都走这里）—— 看别人主页时复用同一段取数逻辑 */
+  async listAnswersBy(userId) {
     const { data, error } = await sb.from('answers_view')
-      .select('*').eq('author_id', me.id).order('created_at', { ascending: false });
+      .select('*').eq('author_id', userId).order('created_at', { ascending: false });
     if (error) throw error;
-    myAnswers = data.map(mapAnswer);
+    return data.map(mapAnswer);
+  },
+
+  async listMyAnswers() {
+    myAnswers = await api.listAnswersBy(me.id);
   },
 
   async listMyViews() {
@@ -941,15 +954,23 @@ const api = {
   },
 
   async listMembers() {
-    // 用 weekly_stats 函数拿：它带真名、参赛年数、本周提问/回答数
-    // （真名没有开放列级查询权限，只有管理者能通过这个函数看到）
+    // 成员目录：昵称 / 身份 / 参赛年数 / 本周与累计统计。所有登录用户都能调；
+    // **真名由数据库按角色决定**（普通用户拿到的是 null；组员及以上才有），
+    // 所以这里不需要（也不应该）在前端补判断。
+    // ⚠️ 函数里**不返回邮箱**（邮箱完全不对外暴露），所以这里没有账号这一维。
     const { data, error } = await sb.rpc('weekly_stats');
     if (error) throw error;
     members = data || [];
   },
 
+  /* 改资料走函数：参赛年数保存时要同时记下「哪一年填的」（跨年自动 +1 的基准），
+     直接 update 表会绕过这一步，把已经涨上去的一岁吃掉。 */
   async updateProfile(fields) {
-    const { error } = await sb.from('profiles').update(fields).eq('id', me.id);
+    const { error } = await sb.rpc('update_profile', {
+      p_display_name: fields.display_name,
+      p_real_name: fields.real_name,
+      p_comp_years: fields.comp_years,
+    });
     if (error) throw error;
   },
 
@@ -1070,6 +1091,10 @@ function requireLogin() {
 
 /* ------------------------------ 登录状态 ------------------------------ */
 async function applySession(session) {
+  /* 退出 / 换账号时把成员目录缓存清掉：
+     目录里真名给不给是**按当前角色**决定的（数据库返回，前端再挡一道），
+     留着上一任的数组会让新身份（尤其是退出后的未登录状态）看到不该看的东西。 */
+  members = [];
   if (!session || !session.user) {
     me = null;
     myVotes = new Set();
@@ -1253,9 +1278,10 @@ async function openProfile() {
   $('#identity-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#profile-mask').classList.remove('hidden');
 
-  // 「成员」只有管理者以上看得到
+  // 「成员」对所有登录用户可见（能看别人的主页 / 目录）；
+  // 目录里的真名、改角色、踢人等仍然各自另有闸门。
   const mb = $('#members-btn');
-  if (mb) mb.classList.toggle('hidden', myLevel() < ADMIN_LEVEL);
+  if (mb) mb.classList.toggle('hidden', !me);
 
   $('#profile-form [name=real_name]').value = me.realName || '';
   $('#profile-form [name=comp_years]').value =
@@ -1368,18 +1394,24 @@ async function openNotices() {
 
 function closeNotices() { $('#notice-mask').classList.add('hidden'); }
 
-/* ------------------------------ 成员列表（管理者以上） ------------------------------ */
+/* --------------------- 成员目录（所有登录用户可见） ---------------------
+   目录本身全员可看（昵称 / 身份 / 参赛年数 / 统计）；
+   真名只给组员及以上，这条由数据库决定，前端只是不显示拿不到的东西。
+   改角色 / 踢人 / 群发提醒这些**管理动作**同理，真正的拦截在数据库函数里。
+   ⚠️ 邮箱完全不参与：目录里没有邮箱列，也没有「按账号搜索」。
+   ---------------------------------------------------------------------- */
 async function openMembers() {
-  if (myLevel() < ADMIN_LEVEL) { toast('只有管理者能看成员列表'); return; }
+  if (!me) { openAuth('login'); return; }
 
   closeProfile();
   $('#members-count').textContent = '';
 
-  // 把上次选的排序 / 筛选恢复回来
-  const sSort = $('#member-sort');
-  const sYears = $('#member-years');
-  if (sSort) sSort.value = ui.memberSort;
-  if (sYears) sYears.value = ui.memberYears;
+  // 把上次选的排序 / 筛选 / 搜索恢复回来
+  const restore = (sel, v) => { const el = $(sel); if (el) el.value = v; };
+  restore('#member-sort', ui.memberSort);
+  restore('#member-years', ui.memberYears);
+  restore('#member-role', ui.memberRole);
+  restore('#member-name', ui.memberName);
 
   $('#member-list').innerHTML = '<div class="faint" style="font-size:13px">正在读取…</div>';
   $('#members-mask').classList.remove('hidden');
@@ -1425,6 +1457,10 @@ function renderMembers() {
   const rb = $('#remind-incomplete');
   if (rb) rb.classList.toggle('hidden', !isSuper);
 
+  /* 真名只有组员及以上拿得到（数据库返回 null）。
+     判断用层级相对比较，不写死数字。 */
+  const canSeeRealName = myLevel() >= MEMBER_LEVEL;
+
   const nameOf = m => String(m.real_name || m.display_name || '');
 
   /* ---- 筛选：参赛年数 ---- */
@@ -1434,6 +1470,25 @@ function renderMembers() {
   } else if (ui.memberYears !== 'all') {
     const min = Number(ui.memberYears);
     list = list.filter(m => (m.comp_years || 0) >= min);
+  }
+
+  /* ---- 筛选：身份 ----
+     用层级相等来判断，不做字符串比较 —— 角色名以后还会变（「组员」就是后加的），
+     写 `m.role === 'admin'` 之类的比较会让加层级时又多一处要改的地方。
+     目前一个层级对应一个角色，所以"层级相等"就是"角色相同"。 */
+  if (ui.memberRole !== 'all' && ROLE_LEVEL[ui.memberRole]) {
+    const wantLevel = ROLE_LEVEL[ui.memberRole];
+    list = list.filter(m => levelOf(m) === wantLevel);
+  }
+
+  /* ---- 筛选：名字（子串匹配，忽略大小写）----
+     同时匹配昵称和真名。非组员的真名是 null（数据库挡的），
+     所以「普通用户搜不到真名」是自然结果，这里不需要额外判断。 */
+  const nameQ = ui.memberName.trim().toLowerCase();
+  if (nameQ) {
+    list = list.filter(m =>
+      String(m.display_name || '').toLowerCase().includes(nameQ)
+      || String(m.real_name || '').toLowerCase().includes(nameQ));
   }
 
   /* ---- 排序：本周活跃 / 提问数 / 回答数 / 参赛年份 / 姓名 ---- */
@@ -1457,15 +1512,20 @@ function renderMembers() {
   $('#member-list').innerHTML = list.length ? list.map(m => {
     const isSelf = me && m.user_id === me.id;
 
+    /* 真名按角色给（数据库返回 null 就是"看不到"）。
+       ⚠️ 对看不到真名的人**不能**显示「真名未填」—— 那可能只是不给他看，
+          不是真的没填，会误导人。 */
     const who = m.real_name
       ? `${esc(m.real_name)} <span class="faint">（${esc(m.display_name)}）</span>`
-      : `${esc(m.display_name)} <span class="faint">（真名未填）</span>`;
+      : canSeeRealName
+        ? `${esc(m.display_name)} <span class="faint">（真名未填）</span>`
+        : esc(m.display_name);
 
     /* 各层级能看到/能做到的不一样，这里必须**按能力渲染**，不能只按"是不是管理者"：
          · 大管理者：四个角色都能设 + 踢出
          · 管理者  ：**只能设「组员」**（授组员权）；不能设管理员（不能越级提拔），
                      也不能降级（"仅大管理者能移除组员"就是这么落地的）
-         · 其余    ：看不到成员面板
+         · 其余    ：能看目录，但一个管理按钮都没有
        按钮和数据库里的 set_user_role 是同一套规则，前端只是提前把做不到的灰掉。 */
     const myLvl = myLevel();
     const assignable = isSuper ? ['user', 'member', 'admin', 'super_admin']
@@ -1490,7 +1550,10 @@ function renderMembers() {
 
     return `<div class="member-row">
       <div class="member-info">
-        <div class="member-name">${who}${roleBadge(m)}${isSelf ? '<span class="faint">（我）</span>' : ''}</div>
+        <div class="member-name">
+          <a class="member-link" href="#/u/${m.user_id}">${who}</a>
+          ${roleBadge(m)}${isSelf ? '<span class="faint">（我）</span>' : ''}
+        </div>
         <div class="member-meta">
           <span>参赛 ${dash(m.comp_years)}${m.comp_years === null || m.comp_years === undefined ? '' : ' 年'}</span>
           <span>·</span><span>提问 <b>${dash(m.questions_total)}</b>（本周 ${dash(m.questions_this_week)}）</span>
@@ -2025,8 +2088,15 @@ function renderList() {
   if (document.activeElement !== si) si.value = ui.q;
 }
 
-/* ------------------------------ 页面：我的 ------------------------------ */
+/* ------------------- 页面：我的 / 某个成员的主页--------------------
+   两个页面共用同一套渲染，只有三处差别（这正是复用而不是另写一套的原因）：
+     · 数据来源：自己 / 别人（取数方法一样，只是 author_id 不同）
+     · 标签页：**浏览记录是私密的**，只有看自己才有；提问和回答人人可看
+     · 基本资料块：只有看别人才显示（看自己时昵称/身份在顶栏和「我的账号」里）
+   ⚠️ 收藏和浏览记录一样是私密的，两个页面都**不出现**别人的收藏。
+   ------------------------------------------------------------------ */
 const ME_TABS = [['questions', '我的提问'], ['answers', '我的回答'], ['views', '浏览记录']];
+const USER_TABS = [['questions', 'TA 的提问'], ['answers', 'TA 的回答']];
 
 async function renderMy() {
   if (!me) {
@@ -2038,12 +2108,70 @@ async function renderMy() {
       </div>`;
     return;
   }
+  await renderUserPage(me.id, { isSelf: true });
+}
+
+async function renderUser(userId) {
+  /* ⚠️ 这里**不要求登录**：提问和回答本来就是对所有人公开的（未登录也能看问题
+     列表和详情）。登录与否只影响顶部那块基本资料 —— 昵称 / 身份 / 参赛年数来自
+     成员目录，目录要登录才能打开，拿不到就退化成用问题/回答里带的昵称。 */
+  await renderUserPage(userId, { isSelf: !!(me && userId === me.id) });
+}
+
+/* 别人的基本资料块：昵称 / 身份徽章 / 参赛年数；真名有就显示（普通用户拿到的是
+   null，所以自然不会显示）。数据来自成员目录，拉不到就退化成只有昵称。
+   ⚠️ 真名这里再挡一道角色判断：数据库对普通用户 / 未登录返回的就是 null，
+      但万一内存里留着上一任（管理者）的旧数组，也不该把它画出来。 */
+function memberHead(userId, answers) {
+  const m = members.find(x => x.user_id === userId);
+  const anyQ = questions.find(x => x.authorId === userId);
+  const anyA = answers.find(x => x.authorId === userId);
+  const fallback = (anyQ && anyQ.author) || (anyA && anyA.author) || null;
+
+  const name = (m && m.display_name) || (fallback && fallback.name) || '成员';
+  const role = (m && m.role) || (fallback && fallback.role) || 'user';
+  const real = (myLevel() >= MEMBER_LEVEL && m && m.real_name)
+    ? `<span>真名 <b>${esc(m.real_name)}</b></span><span>·</span>` : '';
+  const years = (m && m.comp_years !== null && m.comp_years !== undefined)
+    ? `${esc(m.comp_years)} 年` : '未填';
+  const dash = v => (v === null || v === undefined ? '—' : v);
+  const counts = m
+    ? `<span>·</span><span>提问 <b>${dash(m.questions_total)}</b></span>`
+      + `<span>·</span><span>回答 <b>${dash(m.answers_total)}</b></span>`
+    : '';
+
+  return `<div class="panel member-head">
+    <div>${userChip({ id: userId, name, role }, null, 'lg')}</div>
+    <div class="member-meta">
+      ${real}<span>参赛 ${years}</span>${counts}
+    </div>
+  </div>`;
+}
+
+async function renderUserPage(userId, { isSelf }) {
+  const tabsDef = isSelf ? ME_TABS : USER_TABS;
+  /* 从「我的」（有浏览记录）切到别人主页时，active tab 可能落在对方没有的那一页 */
+  if (!tabsDef.some(([k]) => k === ui.meTab)) ui.meTab = 'questions';
+
+  /* 看别人才需要资料块。**每次都重新拉一次目录**：
+     ⚠️ 不能"members 非空就复用"—— 同一次页面会话里可能换了账号登录（角色不同），
+        真名该不该显示会跟着变；复用会拿到上一任的旧值（普通用户看到 null，
+        之后管理者登录也还是 null）。拉失败不致命：提问和回答照样能看。 */
+  if (!isSelf) {
+    try {
+      await api.listMembers();
+    } catch (_) { /* 忽略：退化成只有昵称 / 角色 */ }
+  }
 
   if (ui.meTab === 'questions') await api.list();
-  else if (ui.meTab === 'answers') await api.listMyAnswers();
-  else await api.listMyViews();
+  else if (ui.meTab === 'answers') {
+    if (isSelf) await api.listMyAnswers();
+    else userAnswers = await api.listAnswersBy(userId);
+  } else await api.listMyViews();
 
-  const tabs = ME_TABS.map(([k, label]) =>
+  const answers = isSelf ? myAnswers : userAnswers;
+
+  const tabs = tabsDef.map(([k, label]) =>
     `<button class="tab ${ui.meTab === k ? 'is-active' : ''}" data-action="me-tab" data-tab="${k}">${label}</button>`
   ).join('');
 
@@ -2057,7 +2185,7 @@ async function renderMy() {
   let body = '';
 
   if (ui.meTab === 'questions') {
-    const mine = questions.filter(q => q.authorId === me.id);
+    const mine = questions.filter(q => q.authorId === userId);
     body = mine.length ? mine.map(q => `
       <a class="rowcard" href="#/q/${q.id}">
         <h4>${esc(q.title)}
@@ -2073,10 +2201,12 @@ async function renderMy() {
           ${q.tags.map(t => `<span class="tag" style="cursor:default">${esc(t)}</span>`).join('')}
         </div>
       </a>`).join('')
-      : emptyBox('你还没提过问题。', '点右上角「提问题」发第一个。');
+      : (isSelf
+        ? emptyBox('你还没提过问题。', '点右上角「提问题」发第一个。')
+        : emptyBox('TA 还没提过问题。', ''));
 
   } else if (ui.meTab === 'answers') {
-    body = myAnswers.length ? myAnswers.map(a => `
+    body = answers.length ? answers.map(a => `
       <a class="rowcard" href="#/q/${a.questionId}">
         <h4>${esc(a.questionTitle || '（问题已删除）')}</h4>
         <p class="snippet">${esc(a.body)}</p>
@@ -2085,7 +2215,9 @@ async function renderMy() {
           <span>回答于 ${timeAgo(a.createdAt)}</span>
         </div>
       </a>`).join('')
-      : emptyBox('你还没回答过问题。', '去问题列表挑一个回答试试。');
+      : (isSelf
+        ? emptyBox('你还没回答过问题。', '去问题列表挑一个回答试试。')
+        : emptyBox('TA 还没回答过问题。', ''));
 
   } else {
     body = myViews.length ? myViews.map(v => `
@@ -2102,6 +2234,7 @@ async function renderMy() {
 
   $('#app').innerHTML = `
     <a class="back" href="#/">← 回到问题列表</a>
+    ${isSelf ? '' : memberHead(userId, answers)}
     <div class="toolbar">
       <div class="tabs">${tabs}</div>
       <span class="faint">${ui.meTab === 'views' ? '只保留最近 30 天 · 只有你自己看得到' : ''}</span>
@@ -2308,6 +2441,11 @@ async function route() {
         api.bumpViews(id).catch(() => {});   // 浏览量失败不影响页面
       }
       renderDetail(await api.get(id));
+    } else if (hash.startsWith('#/u/')) {
+      /* 成员主页：从成员目录点人名进来。先把成员弹窗收掉，
+         否则它会盖在刚渲染出来的主页上面（弹窗不在 #app 里，不会被重渲染冲掉）。 */
+      closeMembers();
+      await renderUser(decodeURIComponent(hash.slice(4)));
     } else if (hash === '#/me') {
       await renderMy();
     } else if (hash === '#/ask') {
@@ -2527,7 +2665,9 @@ document.addEventListener('click', async e => {
 
       case 'me-tab':
         ui.meTab = el.dataset.tab;
-        await renderMy();
+        /* 「我的」和成员主页共用同一套标签页渲染，所以这里按当前路由分派 */
+        if (location.hash.startsWith('#/u/')) await renderUser(decodeURIComponent(location.hash.slice(4)));
+        else await renderMy();
         break;
 
       case 'toggle-status':
@@ -2921,6 +3061,13 @@ document.addEventListener('change', async e => {
 document.addEventListener('change', e => {
   if (e.target.id === 'member-sort') { ui.memberSort = e.target.value; renderMembers(); }
   if (e.target.id === 'member-years') { ui.memberYears = e.target.value; renderMembers(); }
+  if (e.target.id === 'member-role') { ui.memberRole = e.target.value; renderMembers(); }
+});
+
+/* 名字搜索框：边打边筛，不用回车。
+   ⚠️ 只重渲染 #member-list，输入框本身在 .member-toolbar 里，不会被冲掉。 */
+document.addEventListener('input', e => {
+  if (e.target.id === 'member-name') { ui.memberName = e.target.value; renderMembers(); }
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */

@@ -1015,11 +1015,14 @@ select display_name as 昵称, role as 角色
 -- 14. 真实姓名 / 参赛年数 / 每周统计 / 资料补全提醒
 --
 --     ⚠️ 隐私设计（重要）：
---     real_name 和 comp_years 是**真名类信息**，不能让随便谁都能查。
+--     real_name 是**真名类信息**，不能让随便谁都能查。
 --     所以这一节把 profiles 的 SELECT 权限**收窄到了具体几列**，
---     真名和参赛年数只能通过下面两个 security definer 函数拿到：
---       · my_profile()     —— 只能看自己那一行
---       · weekly_stats()   —— 只有管理者能看（含全员的真名 / 年数 / 本周数据）
+--     真名只能通过下面的 security definer 函数拿到，并按调用者角色给：
+--       · my_profile()     —— 只能看自己那一行（永远含自己的真名）
+--       · weekly_stats()   —— 所有登录用户都能看（成员目录），但 real_name
+--                              只给**组员及以上**；普通用户拿到 null
+--     邮箱**完全不对外暴露**：任何函数都不返回别人的邮箱，本人看自己的邮箱
+--     走登录态里的 me.email（「我的账号」弹窗）。成员目录因此不碰 auth.users。
 --
 --     ⚠️ 副作用：从此 `select *` 查 profiles 会报权限错误，必须写明列名。
 --        这是故意的，不是 bug。要撤销这个限制就把 14.2 节注释掉。
@@ -1031,10 +1034,48 @@ select display_name as 昵称, role as 角色
 -- ---------------------------------------------------------------------------
 alter table public.profiles add column if not exists real_name  text;
 alter table public.profiles add column if not exists comp_years int;
+-- 「参赛年数」是**基准值 + 记录年份**，显示时算有效值 —— 见下面 comp_years_effective()。
+-- 存基准值而不是"起始年份"是为了让现有数据零变化地迁移（见 14.1.1）。
+alter table public.profiles add column if not exists comp_years_set_year int;
 
 alter table public.profiles drop constraint if exists profiles_comp_years_check;
 alter table public.profiles add constraint profiles_comp_years_check
   check (comp_years is null or (comp_years >= 0 and comp_years <= 30));
+
+
+-- ---------------------------------------------------------------------------
+-- 14.1.1 迁移：给已有数据补上「记录年份」
+--        ⚠️ 必须是幂等的：只补 comp_years_set_year 还是 null 的行。
+--           补上之后有效值 = 原值（今天看起来一模一样），明年才会自动 +1。
+-- ---------------------------------------------------------------------------
+update public.profiles
+   set comp_years_set_year = extract(year from now())::int
+ where comp_years is not null and comp_years_set_year is null;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.1.2 有效参赛年数 = 基准值 + (当前年份 - 记录年份)
+--
+--        抽成一个函数是为了**只有一处公式**：weekly_stats / my_profile 都用它，
+--        不会出现"列表涨了、个人资料没涨"这种不一致。
+--        纯函数（不读表），所以也能直接被测试调用 —— 跨年逻辑不用等一年就能验。
+--
+--        边界：
+--          · 基准值为 null（没填）→ 返回 null，**不能算成 0**（"未填"和"0 年"是两回事）
+--          · 记录年份为 null（理论上有基准值就该有年份）→ 回退成基准值，别崩
+-- ---------------------------------------------------------------------------
+create or replace function public.comp_years_effective(p_comp_years int, p_set_year int)
+returns int
+language sql
+stable
+set search_path = public
+as $$
+  select case
+           when p_comp_years is null then null
+           when p_set_year    is null then p_comp_years
+           else p_comp_years + (extract(year from now())::int - p_set_year)
+         end;
+$$;
 
 
 -- ---------------------------------------------------------------------------
@@ -1044,8 +1085,14 @@ alter table public.profiles add constraint profiles_comp_years_check
 revoke select on public.profiles from anon, authenticated;
 grant select (id, display_name, role, created_at) on public.profiles to anon, authenticated;
 
--- 自己能改的列：昵称、真名、参赛年数。**注意这里没有 role**，所以提不了权
-grant update (display_name, real_name, comp_years) on public.profiles to authenticated;
+-- 自己能改的列：昵称可以**直接**改（没有跨年语义）。
+-- ⚠️ 真名 / 参赛年数必须走 update_profile() 函数，不能直接改：
+--    参赛年数保存时要同时记下「哪一年填的」（comp_years_set_year），
+--    直接改表会绕过这一步，下次保存就把已经涨上去的年份吃掉。
+--    所以这里显式撤销这两列的直改授权（revoke 列级权限不会随表级 revoke 一起没）。
+revoke update on public.profiles from anon, authenticated;
+revoke update (real_name, comp_years) on public.profiles from anon, authenticated;
+grant update (display_name) on public.profiles to authenticated;
 
 
 -- ---------------------------------------------------------------------------
@@ -1080,25 +1127,91 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- 14.4 看自己的资料（含真名 / 参赛年数）
+--      ⚠️ comp_years 返回的是**有效值**（算上跨年增长），不是原始基准值。
+--         comp_years_set_year 也一并返回：它是"基准值是哪一年填的"，
+--         属于调用者自己的数据，前端据此把表单填成有效值，测试也用它验证盖章。
+--      ⚠️ 返回列变过，所以这里必须 drop 再 create（create or replace 改不了返回类型）。
 -- ---------------------------------------------------------------------------
-create or replace function public.my_profile()
+drop function if exists public.my_profile();
+
+create function public.my_profile()
 returns table (
-  id uuid, display_name text, real_name text, comp_years int, role text
+  id uuid, display_name text, real_name text,
+  comp_years int, comp_years_set_year int, role text
 )
 language sql
 security definer
 set search_path = public
 stable
 as $$
-  select p.id, p.display_name, p.real_name, p.comp_years, p.role
+  select p.id,
+         p.display_name,
+         p.real_name,
+         public.comp_years_effective(p.comp_years, p.comp_years_set_year),
+         p.comp_years_set_year,
+         p.role
     from public.profiles p
    where p.id = auth.uid();
 $$;
 
 
 -- ---------------------------------------------------------------------------
--- 14.5 成员统计：每个人**本周**（周一起算）和**累计**的提问数 / 回答数
---      只有管理者（admin / super_admin）能调用
+-- 14.4.1 保存自己的资料（昵称 / 真名 / 参赛年数）
+--
+--        ⚠️ 参赛年数必须走这个函数，不能直接 update profiles：
+--           保存时要**同时把 comp_years_set_year 盖成当前年份**，
+--           否则下一次保存会拿"旧的基准值 + 新的记录年份"去覆盖，
+--           把这一年自动涨上去的那一岁吃掉（前端表单显示的是有效值，
+--           用户不改也会把它提交回来，所以这一步是必须的）。
+--
+--        昵称仍允许直接改（见 14.2），因为它没有跨年语义。
+-- ---------------------------------------------------------------------------
+create or replace function public.update_profile(
+  p_display_name text,
+  p_real_name    text,
+  p_comp_years   int
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_name text := trim(coalesce(p_display_name, ''));
+  v_real text := nullif(trim(coalesce(p_real_name, '')), '');
+  v_year int  := extract(year from now())::int;
+begin
+  if auth.uid() is null then raise exception '请先登录'; end if;
+
+  if v_name = '' then raise exception '昵称不能为空'; end if;
+  if p_comp_years is not null and (p_comp_years < 0 or p_comp_years > 30) then
+    raise exception '参赛年数请填 0～30 的整数';
+  end if;
+
+  update public.profiles
+     set display_name        = v_name,
+         real_name           = v_real,
+         -- 存的是"基准值"，和"哪一年填的"配对；显示时由 comp_years_effective 算
+         comp_years          = p_comp_years,
+         comp_years_set_year = case when p_comp_years is null then null else v_year end
+   where id = auth.uid();
+end;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.5 成员目录：昵称 / 角色 / 参赛年数 / 本周与累计统计
+--      **所有登录用户都能调用** —— 成员列表对全体成员可见（有意的行为变更）。
+--
+--      ⚠️ 真名 real_name 只给**组员及以上**，而且**必须在这里判断**：
+--         这是个 security definer 函数，一旦对所有人开放，不写 case 的话真名
+--         会跟着返回给普通用户 —— 前端藏起来只是体验，绕不过接口。
+--         判断用 role_level 相对比较，不写死数字（加了「组员」这一层之后，
+--         写死 < 2 就会把规则写错）。
+--
+--      ⚠️ 这里**故意不返回 email**：邮箱属于账号信息，不对外暴露给任何人
+--         （本人看自己的邮箱走登录态里的 me.email）。成员目录因此**完全不碰
+--         auth.users** —— 少一条读取路径就少一类风险，也不需要为它做降级处理。
 --
 --      ⚠️ 这个函数**只在这里定义一次**。之前在第 15 节里又定义过一遍，
 --         重跑整个脚本时会因为"返回列不一致"报
@@ -1125,20 +1238,26 @@ set search_path = public
 stable
 as $$
 begin
-  -- ⚠️ 这里是"至少管理者"的闸门。原来写 < 2；加了「组员」之后 2 变成组员，
-  --    不改的话*组员*会被放进来 —— 本次改动最危险的一处。
-  --    改成和 admin 的层级比，不写死数字。
-  if public.role_level(public.my_role()) < public.role_level('admin') then
-    raise exception '只有管理者能看统计';
+  -- 只要求登录：成员列表现在对所有登录用户开放。
+  -- （原来是 role_level < role_level('admin') 的管理者闸门，已按需求去掉。）
+  if auth.uid() is null then
+    raise exception '请先登录';
   end if;
 
   return query
     select
       p.id,
       p.display_name,
-      p.real_name,
+      -- 真名：组员及以上才给，普通用户一律得到 null。
+      -- 放在函数里而不是只靠前端隐藏，才是真正的边界。
+      case
+        when public.role_level(public.my_role()) >= public.role_level('member')
+          then p.real_name
+        else null
+      end,
       p.role,
-      p.comp_years,
+      -- 有效值（算上跨年增长）—— 和 my_profile 共用同一个公式，不会两处对不上
+      public.comp_years_effective(p.comp_years, p.comp_years_set_year),
       (select count(*) from public.questions q
         where q.author_id = p.id
           and q.created_at >= date_trunc('week', now()))::int,
@@ -1151,6 +1270,22 @@ begin
    order by p.created_at;
 end;
 $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 14.5.1 清理一个曾经存在过的函数
+--
+--       ⚠️ 这一段是为了**幂等**：中间有一版曾把成员邮箱通过
+--          public.member_emails() 暴露给管理者（用于「按账号搜索」），
+--          后来按隐私要求把邮箱整个撤掉了。如果谁的库里已经跑过那一版，
+--          这里要把它删干净，否则会留一个能读 auth.users 的悬空接口。
+--          （全新数据库上这条 drop 是无害的 no-op。）
+--
+--       邮箱现在是**完全不对外暴露**的：任何人（含管理者）都拿不到别人的邮箱，
+--       成员目录也不再碰 auth.users —— 少一条读取路径就少一类风险。
+--       本人看自己的邮箱仍然走登录态里的 me.email（「我的账号」弹窗）。
+-- ---------------------------------------------------------------------------
+drop function if exists public.member_emails();
 
 
 -- ---------------------------------------------------------------------------
@@ -1197,8 +1332,11 @@ $$;
 -- 14.7 授权
 -- ---------------------------------------------------------------------------
 grant execute on function public.my_profile()            to authenticated;
+grant execute on function public.update_profile(text, text, int) to authenticated;
 grant execute on function public.weekly_stats()          to authenticated;
 grant execute on function public.remind_incomplete(text) to authenticated;
+-- 纯计算公式，没有数据；显式授权只是为了不依赖"函数默认对 PUBLIC 开放"这个隐含行为
+grant execute on function public.comp_years_effective(int, int) to authenticated;
 
 
 -- ---------------------------------------------------------------------------
@@ -1299,18 +1437,25 @@ grant execute on function public.set_question_tags(uuid, text[]) to authenticate
 -- ---------------------------------------------------------------------------
 -- 16.1 权限总表（前后端都按这张表实现，改代码前先对一遍）
 --
---   能力                        | 普通用户 | 管理者 | 大管理者
---   ---------------------------|---------|--------|------------------
---   改自己的标签                 |   ✅    |   ✅   |   ✅
---   改普通用户的标签             |   ❌    |   ✅   |   ✅
---   改管理者 / 大管理者的标签     |   ❌    |   ❌   |   ✅（除自己）
---   提醒普通用户                  |   ❌    |   ✅   |   ✅
---   提醒管理者 / 大管理者         |   ❌    |   ❌   |   ✅（除自己）
---   删普通用户的问题 / 回答       |   ❌    |   ✅   |   ✅
---   删管理者 / 大管理者的内容     |   ❌    |   ❌   |   ✅（除自己）
---   看成员列表（含真名 / 统计）   |   ❌    |   ✅   |   ✅
---   任命 / 撤销角色              |   ❌    |   ❌   |   ✅
---   群发"补全资料"提醒           |   ❌    |   ❌   |   ✅
+--   能力                          | 普通用户 | 组员 | 管理者 | 大管理者
+--   -----------------------------|---------|------|--------|----------
+--   改自己的标签                   |   ✅    |  ✅  |   ✅   |   ✅
+--   改普通用户/组员的标签          |   ❌    |  ❌  |   ✅   |   ✅
+--   改管理者 / 大管理者的标签       |   ❌    |  ❌  |   ❌   |   ✅（除自己）
+--   提醒普通用户 / 组员            |   ❌    |  ❌  |   ✅   |   ✅
+--   提醒管理者 / 大管理者           |   ❌    |  ❌  |   ❌   |   ✅（除自己）
+--   删普通用户 / 组员的问题 / 回答  |   ❌    |  ❌  |   ✅   |   ✅
+--   删管理者 / 大管理者的内容       |   ❌    |  ❌  |   ❌   |   ✅（除自己）
+--   看成员目录（昵称/身份/参赛年数/  |   ✅    |  ✅  |   ✅   |   ✅
+--     本周与累计统计）              |         |      |        |
+--   看成员的真实姓名 real_name      |   ❌    |  ✅  |   ✅   |   ✅
+--   看任何人的邮箱                  |   ❌    |  ❌  |   ❌   |   ❌
+--   任命 / 撤销角色                |   ❌    |  ❌  |   ❌   |   ✅
+--   群发"补全资料"提醒              |   ❌    |  ❌  |   ❌   |   ✅
+--
+--   * 「组员」没有额外的管理权限，唯一比普通用户多的就是「能看到真名」和身份徽章 ——
+--     这是刻意的：真名给到"自己人"这一档。
+--   * 邮箱对所有人（含管理者）都不通过接口暴露；本人看自己的邮箱走登录态。
 -- ---------------------------------------------------------------------------
 
 

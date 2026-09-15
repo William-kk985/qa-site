@@ -125,31 +125,46 @@ async function membersPanel(role) {
     rows = await waitFor(async () => (await s.count('.member-row')) >= 1, 15000);
   }
   const roleBtns = await s.count('[data-action="set-role"]');
+  /* 角色按钮上的字：不同层级能授的角色不一样（管理者只能授「组员」），
+     断言按"文字 + 行数"来做，不写死按钮个数 —— 加一层角色时这里也会跟着对。 */
+  const roleLabels = await s.ev(`[...document.querySelectorAll('[data-action="set-role"]')]
+    .map(b => b.innerText.trim())`);
+  const rowsN = await s.count('.member-row');
   const kickBtns = await s.count('[data-action="kick"]');
   const remindAll = await s.shown('#remind-incomplete');
   await s.ev(`document.querySelector('#members-mask [data-action="close-modal"]').click()`);
   await sleep(300);
   await s.ev(`document.querySelector('#profile-mask').click()`);
   await sleep(300);
-  return { hasBtn, roleBtns, remindAll, kickBtns };
+  return { hasBtn, roleBtns, roleLabels, rows: rowsN, remindAll, kickBtns };
 }
 
 const mUser = await membersPanel('user');
-check('【普通用户】看不到「成员管理」按钮', !mUser.hasBtn);
+/* 成员目录对所有登录用户开放（有意的行为变更）：普通用户能打开，
+   但看不到任何管理按钮 —— 真名也不显示（前端按层级隐藏，数据库也只给组员以上）。 */
+check('【普通用户】能打开「成员」目录（对所有人开放）', mUser.hasBtn);
+check('【普通用户】看不到「改角色」按钮', mUser.roleBtns === 0, mUser.roleBtns + ' 个');
+check('【普通用户】看不到「提醒未补全资料的人」', !mUser.remindAll);
+check('【普通用户】看不到「踢出」按钮', mUser.kickBtns === 0, mUser.kickBtns + ' 个');
 
 const mAdmin = await membersPanel('admin');
 check('【管理者】能看到「成员管理」按钮', mAdmin.hasBtn);
-check('【核心】管理者看不到「改角色」按钮', mAdmin.roleBtns === 0, mAdmin.roleBtns + ' 个');
+/* 管理者的能力是「授组员」：每行一个按钮，且只能是「组员」——
+   既不能设管理员（越级提拔），也不能降级。 */
+check('【核心】管理者只能把成员设为「组员」（每行一个，且都写「组员」）',
+  mAdmin.rows >= 1 && mAdmin.roleBtns === mAdmin.rows
+  && mAdmin.roleLabels.every(t => t === '组员'),
+  `${mAdmin.roleBtns} 个 / ${mAdmin.rows} 行：[${mAdmin.roleLabels.join(',')}]`);
 check('【核心】管理者看不到「提醒未补全资料的人」', !mAdmin.remindAll);
 check('【核心】管理者看不到「踢出」按钮', mAdmin.kickBtns === 0, mAdmin.kickBtns + ' 个');
 
 const mSuper = await membersPanel('super_admin');
 check('【大管理者】能看到「成员管理」按钮', mSuper.hasBtn);
-check('【大管理者】能看到「改角色」按钮', mSuper.roleBtns >= 3, mSuper.roleBtns + ' 个');
+check('【大管理者】每一行都能设四种角色', mSuper.roleBtns === mSuper.rows * 4,
+  `${mSuper.roleBtns} 个 / ${mSuper.rows} 行`);
 check('【大管理者】能看到「提醒未补全资料的人」', mSuper.remindAll);
-check('【大管理者】能看到「踢出」按钮', mSuper.kickBtns >= 1, mSuper.kickBtns + ' 个');
-check('自己那一行没有「踢出」按钮（不能踢自己）', mSuper.kickBtns === mSuper.roleBtns / 3 - 1,
-  `踢出 ${mSuper.kickBtns} 个 / 成员 ${mSuper.roleBtns / 3} 个`);
+check('【大管理者】看不到自己的「踢出」按钮（除自己外每行一个）',
+  mSuper.kickBtns === mSuper.rows - 1, `踢出 ${mSuper.kickBtns} 个 / 成员 ${mSuper.rows} 个`);
 
 // 被测页面里被改成了假身份，刷新一下还原本机真实登录态
 await s.reload();

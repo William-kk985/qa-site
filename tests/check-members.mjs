@@ -74,8 +74,8 @@ await waitFor(async () => (await s.count('.member-row')) >= 4, 10000);
 check('恢复「全部」筛选', (await s.count('.member-row')) >= 4);
 
 /* 大管理者能看到改角色的按钮 */
-check('大管理者能看到改角色的三个按钮',
-  (await s.count('[data-action="set-role"]')) >= 3);
+check('大管理者能看到改角色的按钮（四种角色）',
+  (await s.count('[data-action="set-role"]')) >= 4);
 check('自己那一行的角色按钮是禁用的（不能给自己降级）',
   await s.ev(`!!document.querySelector('[data-action="set-role"][disabled]')`));
 check('有「提醒未补全资料的人」按钮', await s.shown('#remind-incomplete'));

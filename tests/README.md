@@ -81,7 +81,10 @@ export QA_PASS='...'
 | `check-plugin-theme.mjs` | 否 | 插件把 wasm 数字翻译成 CSS：圆角/宽度/字号/内边距/主题色真的变了，自定义 CSS 仍能盖过插件 |
 | `check-plugin-js.mjs` | 否 | JS 插件后端：上传 `javascript.js` 生效、状态行标 JS、wasm ↔ js 互相切换、两个错误分支（`.js` 改名 `.wasm` / 无导出的 `.js`）、移除与一键还原、安全警告文案 |
 | `check-banner.mjs` | 是 | 「资料没补全」横幅在列表页 / 详情页 / 我的 / 提问页都显示 |
-| `check-members.mjs` | 是 | 成员面板：打开、排序、筛选、改角色按钮可见性 |
+| `check-members.mjs` | 是 | 成员目录：打开、排序、按参赛年数筛选、改角色按钮可见性（大管理者视角） |
+| `check-directory.mjs` | 是（+ 自造账号） | 成员目录对**所有登录用户**开放；三个筛选维度（参赛年份 / 身份 / 名字）都工作；**真名对普通用户隐藏、对组员可见**；**任何邮箱都不出现在界面上**；数据库层 weekly_stats 的新规则 |
+| `check-profile.mjs` | 是（+ 自造账号） | 成员主页 `#/u/<id>`：从成员目录点人名进入、看得到对方的提问和回答、**看不到对方的收藏**（含 RLS 层）、普通用户看不到真名 / 大管理者能看到 |
+| `check-comp-years.mjs` | 是（+ 自造账号） | 参赛年数**跨年自动 +1**（用 `comp_years_effective()` 喂"两年前的年份"验证，不用等一年）、保存后基准年份盖成当年、null 仍是 null、不能绕过函数直改 |
 | `check-noescape.mjs` | 是 | 不越级：普通用户 / 管理者 / 大管理者各自能看到哪些操作按钮（在页面里临时伪造 `me.id`+`me.role`） |
 | `check-identity.mjs` | 是 | 登录方式绑定：身份列表、绑定 GitHub 按钮、单身份不给解绑 |
 | `check-reset.mjs` | 是 | 忘记密码 / 修改密码弹窗的字段显隐与按钮文案（不真的发邮件、不真的改密码） |
