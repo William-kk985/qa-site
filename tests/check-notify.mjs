@@ -136,6 +136,16 @@ try {
 
   /* ---------- 9. 清理并确认 ---------- */
   const goneQid = qid;
+
+  /* ⚠️ 卡卡是**真实账号**，会被别的测试留下通知（check-edit 的「标签被改」、
+     check-roles 的删除理由…）。所以这里**不能断言"一条都不剩"** —— 那条断言
+     依赖"跑之前卡卡的通知恰好是 0 条"，跑的顺序一变就时好时坏
+     （实测：单独跑过、整轮跑挂，报"还剩 1 条"，看起来像级联删除坏了，
+      其实是别人留下的）。
+     改成和**删除前的基线**比：级联删除的效果是"少 1 条"，这个不受残留影响。 */
+  const naBefore = await call('GET', '/rest/v1/notifications_view?select=id', { token: admin.token });
+  const naBase = Array.isArray(naBefore.data) ? naBefore.data.length : -1;
+
   await call('DELETE', `/rest/v1/answers?id=eq.${aid}`, { token: admin.token });
   await call('DELETE', `/rest/v1/questions?id=eq.${qid}`, { token: b.token });
   aid = null; qid = null;
@@ -145,8 +155,9 @@ try {
     `还剩 ${Array.isArray(r.data) ? r.data.length : '?'} 条`);
 
   r = await call('GET', '/rest/v1/notifications_view?select=id', { token: admin.token });
-  check('删除后卡卡的通知也自动清掉', Array.isArray(r.data) && r.data.length === 0,
-    `还剩 ${Array.isArray(r.data) ? r.data.length : '?'} 条`);
+  const naAfter = Array.isArray(r.data) ? r.data.length : -1;
+  check('删除后卡卡关于这条问题的通知也自动清掉（比删除前少 1 条）',
+    naBase === naAfter + 1, `删除前 ${naBase} 条 → 删除后 ${naAfter} 条`);
 
   r = await call('GET', `/rest/v1/questions?select=id&id=eq.${goneQid}`, { token: b.token });
   check('测试问题已删除', Array.isArray(r.data) && r.data.length === 0);
