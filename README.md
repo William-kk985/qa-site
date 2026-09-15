@@ -68,6 +68,8 @@ qa-site/
 ├── styles.css            样式（含深色模式、手机适配）
 ├── app.js                全部逻辑：路由、渲染、调用后端
 ├── config.js             ← 后端地址和 key 在这里，换后端只改这个文件
+├── tsconfig.json         类型检查配置（只看不写，不参与部署，见「关于 TypeScript」）
+├── globals.d.ts          给类型检查用的全局声明（同上，不参与部署）
 ├── vendor/
 │   ├── supabase.js       supabase-js 库（已下载到本地，不依赖任何 CDN）
 │   └── VERSION.txt       库的版本号
@@ -424,19 +426,73 @@ q.votes * 3 + q.answerCount * 5 + q.views / 100
 
 **两回事，别混**：
 
-- **给网站本身加类型**（下面这段）—— 没上构建步骤，用 JSDoc + `// @ts-check` 就能吃到 90% 的好处
+- **给网站本身加类型**（下面这段）—— **已经做了**，用 JSDoc + `// @ts-check`，没上构建步骤
 - **用 TS 写插件** —— 走上面那个 **JS 插件后端**：`tsc` 编出 `.js`，上传即可，网站不需要任何构建步骤
 
 下面是前者的说明。
 
-**没上构建步骤，但也能吃到 TS 的好处**：现在整套是"零构建"的纯静态站，
-引入 `tsc` / vite 会让部署流程多一步、本地要先 `npm install`。
+#### 已经这么做了：`tsc` 只检查，不产出
 
-如果想让懂 TS 的人更舒服，**推荐用 JSDoc + `// @ts-check`**：
-文件还是 `.js`，但编辑器里有完整类型提示和报错，CI 里跑一次 `tsc --noEmit` 就能拦住类型错误 ——
-**拿到 TS 90% 的好处，不引入任何构建复杂度**。
+| 文件 | 是什么 |
+|---|---|
+| `tsconfig.json` | 检查配置。`allowJs` + `checkJs` + `noEmit` —— **只看不写**，不生成任何文件 |
+| `globals.d.ts` | 声明 `window.QA_CONFIG` / `window.supabase` / `window.loadPyodide` 这几个挂载点 |
+| `app.js` / `config.js` 第一行 | `// @ts-check`（必须是**第一行的注释**才生效），编辑器里因此有完整提示和报错 |
+
+> 这三个文件都**不进部署**：`.github/workflows/pages.yml` 是逐个 `cp` 文件的，没列它们。
+> 所以加了类型检查之后，线上发布的还是原来那几个文件。
+
+**怎么跑**（先装 Node，然后随便用哪个 `tsc` 都行 —— 仓库里没有 `package.json`，
+不装依赖也能跑）：
+
+```bash
+npx tsc -p tsconfig.json --noEmit      # 用 npx 临时下载
+# 或者机器上已经有 tsc：
+tsc -p tsconfig.json --noEmit
+```
+
+⚠️ **目录里有 `tsconfig.json` 时，命令行上不要再直接写文件名**（比如 `tsc app.js`），
+会报 `error TS5112`。要么用上面的 `-p tsconfig.json`，要么加 `--ignoreConfig`。
+
+**检查的是什么级别**
+
+不是"什么都管"，是**能抓到真 bug、又几乎不产生噪音**的那一档：
+
+| 抓得到 | 漏得掉 |
+|---|---|
+| `Question` / `Answer` / `Profile` / `Notice` / `ThemeConfig` 等数据结构上**属性名拼错**（还会提示 *Did you mean …?*） | `null` / `undefined` 相关的问题（`$('#id')` 可能是 null 这类） |
+| `api.*` 的**参数传错类型 / 传错个数**；`status` / `role` / 筛选标签写成 `'sovled'` 这种**拼错的字面量** | 第三方 SDK（`vendor/supabase.js`）内部的用法错 —— 它的返回类型只能是 `any` |
+| `mapQuestion` / `mapAnswer` 里数据库字段写成 camelCase（`r.answerCount` 而不是 `r.answer_count`） | 纯样式 / 未使用变量之类的问题 |
+
+数据结构写在 `app.js` 顶部那段 `@typedef` 里；`api` 每个方法的入参和返回值都标了 JSDoc。
+**这是刻意选的甜点区**：类型只加在"数据从后端进出的那一层"，界面渲染代码保持宽松。
+
+**为什么不开 `strict`**
+
+这个代码库大量用 `$('#id').value` 这种写法（`$` 同时服务 `input` / `textarea` / `select`，
+返回值只可能是 `any`，否则每个 `.value` 都要类型断言）。一开 `strictNullChecks`，
+会瞬间炸出几百条"对象可能为 null"——绝大多数是这个项目**刻意接受**的写法，属于噪音。
+
+**噪音一多就没人看了，检查也就等于没有。** 所以这里宁可少抓一类错，也要保证
+`tsc --noEmit` 的**输出永远是干净的零错误**：只有真的出问题时才有红字，才会有人管。
+
+> 反过来，`noImplicitReturns` / `noFallthroughCasesInSwitch` / `strictFunctionTypes` /
+> `noImplicitThis` / `allowUnreachableCode: false` 这几个是**开着但不产生噪音**的，
+> 所以都打开了（它们各自能挡一类真 bug，见 `tsconfig.json` 里的注释）。
+>
+> `tsconfig.json` 的 `files` 只列了 `globals.d.ts` / `config.js` / `app.js` 三个 ——
+> `plugins/`、`tests/`、`.preview/`、`vendor/`、`sw.js` 都不在检查范围内
+> （尤其 `plugins/ts/tsconfig.json` 是"用 TS 写示例插件"的独立配置，和这里互不影响）。
+
+**这没有破坏「零构建」**：`noEmit` 保证不产出任何文件，不装 Node 也照样能直接用这个站——
+`python3 -m http.server` 起一个静态服务，页面照常跑；类型检查只是**开发时**多跑的一条命令。
+
+> CI 里也可以加一条 `tsc -p tsconfig.json --noEmit`（现在还没加，
+> `.github/workflows/pages.yml` 只负责发布）。加的话注意：**别把检查接进发布链路**，
+> 它应该是一条独立的、失败就红叉的检查，而不是部署前的 build 步骤。
 
 ## 源码是公开的：什么安全、什么绝对不能提交
+
 
 GitHub Pages 免费版只能用**公开仓库**，所以这个仓库里的一切**任何人都能看到**（包括 `config.js` 和 `schema.sql`）。这是设计如此，不是漏洞 —— 但要知道边界在哪：
 

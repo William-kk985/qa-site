@@ -1,3 +1,4 @@
+// @ts-check
 /* ==========================================================================
    问答站 · 前端（真实后端版）
    --------------------------------------------------------------------------
@@ -7,13 +8,278 @@
    想换后端 / 改表结构，只需要动下面 api.* 这几个方法，界面代码不用碰。
    ========================================================================== */
 
+/* ============================================================================
+   类型标注（只给 tsc / 编辑器看，运行时不存在）
+   ----------------------------------------------------------------------------
+   为什么放最前面：类型是文件级可见的，集中放一处比散在 3400 行里好找。
+   这里写的是**数据结构**和**接口**的形状，不是"每个变量都标一遍"。
+   要抓的就三类错：属性名拼错、传错参数、返回值用错。
+
+   ⚠️ 为什么不开 strict：这个文件里到处是 `$('#id').value` 这种写法
+      （$ 可能返回 null）。开了 strictNullChecks 会瞬间多出几百条
+      "对象可能为 null" —— 绝大多数是这个项目刻意接受的写法，属于噪音。
+      噪音一多就没人看了，检查等于没有。见 tsconfig.json 里的完整说明。
+   ============================================================================ */
+
+/**
+ * 角色。四级，级别的相对顺序写在 ROLE_LEVEL 里（不要在这里写死数字）。
+ * @typedef {'user'|'member'|'admin'|'super_admin'} Role
+ */
+
+/** 问题的状态：待回答 / 提问者自己标记的已解决。 @typedef {'open'|'solved'} QuestionStatus */
+
+/** 明暗设置。 @typedef {'system'|'light'|'dark'} ThemeScheme */
+
+/** 列表密度。 @typedef {'comfortable'|'compact'|'loose'} Density */
+
+/** 列表页的筛选标签。 @typedef {'new'|'hot'|'unanswered'|'solved'|'saved'} FilterKey */
+
+/** 「我的 / TA 的主页」的标签页。 @typedef {'questions'|'answers'|'views'} MeTab */
+
+/** 外观面板的三个页签。 @typedef {'basic'|'source'|'plugin'} ThemeTab */
+
+/**
+ * 作者 / 通知发起人（视图里带出来的那一小撮字段）。
+ * id 为 null = 账号已注销，界面回落到「匿名用户 / 某人」。
+ * @typedef {object} AuthorRef
+ * @property {string|null} id
+ * @property {string} name
+ * @property {Role} role
+ */
+
+/**
+ * 列表和详情页用的问题。字段来自 mapQuestion —— 那里已经把数据库的
+ * snake_case 转成了 camelCase，之后全站只用这份。
+ * @typedef {object} Question
+ * @property {string} id
+ * @property {string} title
+ * @property {string} body
+ * @property {string[]} tags
+ * @property {number} createdAt
+ * @property {number} views
+ * @property {number} votes
+ * @property {number} answerCount
+ * @property {string|null} acceptedAnswerId
+ * @property {QuestionStatus} status
+ * @property {string} authorId
+ * @property {number|null} editedAt
+ * @property {AuthorRef} author
+ */
+
+/** 问题详情 = 问题 + 它的回答（api.get 的返回值）。 @typedef {Question & { answers: Answer[] }} QuestionDetail */
+
+/**
+ * 一条回答。questionTitle 是视图顺手带出来的（「我的回答」要显示它）。
+ * @typedef {object} Answer
+ * @property {string} id
+ * @property {string} questionId
+ * @property {string} questionTitle
+ * @property {string} body
+ * @property {number} createdAt
+ * @property {number|null} editedAt
+ * @property {number} votes
+ * @property {string} authorId
+ * @property {AuthorRef} author
+ */
+
+/**
+ * 成员目录里的一行（RPC weekly_stats 的返回值）。
+ * ⚠️ real_name 对普通用户 / 未登录是 null（数据库按角色决定给不给）——
+ *    所以「看不到真名」和「真名未填」是两回事，别拿 null 当没填，见 renderMembers。
+ * @typedef {object} Profile
+ * @property {string} user_id
+ * @property {string} display_name
+ * @property {string|null} real_name
+ * @property {Role} role
+ * @property {number|null} comp_years
+ * @property {number} questions_this_week
+ * @property {number} answers_this_week
+ * @property {number} questions_total
+ * @property {number} answers_total
+ */
+
+/**
+ * 当前登录用户（applySession 组出来的那份）。
+ * 注意字段名和 Profile 不一样：这里是 camelCase，且是"自己看自己"（含邮箱、真名）。
+ * @typedef {object} Me
+ * @property {string} id
+ * @property {string} name
+ * @property {string} email
+ * @property {Role} role
+ * @property {string} realName
+ * @property {number|null} compYears
+ */
+
+/**
+ * 站内通知（api.loadNotices 的产物）。type 的取值见 schema.sql 里的触发器。
+ * @typedef {object} Notice
+ * @property {string} id
+ * @property {string} type
+ * @property {boolean} isRead
+ * @property {number} createdAt
+ * @property {string|null} questionId
+ * @property {AuthorRef} actor
+ * @property {string} questionTitle
+ * @property {string} note
+ */
+
+/**
+ * 「浏览记录」里的一条（私密，只保留最近 30 天）。
+ * @typedef {object} ViewRecord
+ * @property {string} questionId
+ * @property {string} title
+ * @property {string[]} tags
+ * @property {QuestionStatus} status
+ * @property {number} viewedAt
+ */
+
+/**
+ * 一条登录方式（Supabase auth 的 identity 对象，只列我们用到的字段）。
+ * 不同版本里主键叫 identity_id 或 id，所以 identityKey() 两个都认。
+ * @typedef {object} Identity
+ * @property {string} [identity_id]
+ * @property {string} [id]
+ * @property {string} provider
+ * @property {{ email?: string, phone?: string, user_name?: string,
+ *              preferred_username?: string, full_name?: string,
+ *              name?: string }} [identity_data]
+ */
+
+/**
+ * Supabase 登录会话里的 user（只列我们用到的字段）。
+ * user_metadata 是注册时塞进去的那些（display_name / user_name / …），
+ * 键名由 SDK 和第三方 provider 决定，所以写成开放的索引签名。
+ * @typedef {object} SessionUser
+ * @property {string} id
+ * @property {string} [email]
+ * @property {Record<string, string|undefined>} [user_metadata]
+ */
+
+/**
+ * 插件能替换的一个外观槽位：i 是编号，lo/hi 是合法范围，dflt 是"插件不插手"时的默认值。
+ * @typedef {object} ThemeSlot
+ * @property {number} i
+ * @property {string} name
+ * @property {number} lo
+ * @property {number} hi
+ * @property {number} dflt
+ */
+
+/**
+ * explain() 的返回值：一句标题 + 可选的补充说明。
+ * @typedef {object} ErrInfo
+ * @property {string} title
+ * @property {string} detail
+ */
+
+/**
+ * 「看源码」里列出的一个文件。
+ * needsSw = 只有装了本地拦截器才能改（页面加载时就要跑的那些文件）。
+ * @typedef {object} SrcFile
+ * @property {string} key
+ * @property {boolean} [editable]
+ * @property {boolean} [needsSw]
+ * @property {string} note
+ */
+
+/**
+ * IndexedDB 里存的一份本地覆盖。
+ * baseHash 是**保存时**线上版的哈希，用来判断"站长后来更新过没有"。
+ * @typedef {object} SwOverride
+ * @property {string} key
+ * @property {string} text
+ * @property {string} baseHash
+ * @property {number} savedAt
+ */
+
+/**
+ * 外观设置（localStorage 的 qa_theme_v1）。THEME_DEFAULTS 是它的默认值。
+ * @typedef {object} ThemeConfig
+ * @property {string} primary
+ * @property {ThemeScheme} scheme
+ * @property {number} font
+ * @property {number} radius
+ * @property {number} width
+ * @property {Density} density
+ * @property {string} css
+ * @property {string} js
+ * @property {string} plugin
+ * @property {string} pluginJs
+ * @property {string} pluginPy
+ * @property {string} pluginName
+ * @property {boolean} sw
+ */
+
+/**
+ * update_profile 的参数。real_name / comp_years 用 null 表示「清空 / 未填」。
+ * @typedef {object} ProfileUpdate
+ * @property {string} display_name
+ * @property {string|null} real_name
+ * @property {number|null} comp_years
+ */
+
+/**
+ * 插件的导出对象。三种后端（wasm / js / py）的 ABI 完全一样，
+ * 所以这里只描述"有哪些函数"，不管它是哪来的。
+ * qa_buffer / memory 只有 wasm 那条搜索字符串的路才会用到。
+ * @typedef {object} PluginExports
+ * @property {((i: number) => number) | undefined} [theme]
+ * @property {((votes: number, answers: number, views: number, ageDays: number) => number) | undefined} [hot_score]
+ * @property {((query: string, text: string) => number) | undefined} [search_score]
+ * @property {(() => number) | undefined} [qa_buffer]
+ * @property {WebAssembly.Memory | undefined} [memory]
+ */
+
+/**
+ * questions_view 返回的一行（数据库那边是 snake_case）。
+ * 单独写一份是为了让 mapQuestion 内部的字段名也能被检查 ——
+ * 写成 r.answerCount 这种会被抓出来，而不是悄悄变成 undefined。
+ * @typedef {object} QuestionRow
+ * @property {string} id
+ * @property {string} title
+ * @property {string} body
+ * @property {string[]|null} tags
+ * @property {string} created_at
+ * @property {number|null} views
+ * @property {number|null} votes
+ * @property {number|null} answer_count
+ * @property {string|null} accepted_answer_id
+ * @property {QuestionStatus|null} status
+ * @property {string} author_id
+ * @property {string|null} edited_at
+ * @property {AuthorRef|null} author
+ */
+
+/** answers_view 返回的一行。 @typedef {object} AnswerRow
+ * @property {string} id
+ * @property {string} question_id
+ * @property {string|null} question_title
+ * @property {string} body
+ * @property {string} created_at
+ * @property {string|null} edited_at
+ * @property {number|null} votes
+ * @property {string} author_id
+ * @property {AuthorRef|null} author
+ */
+
 /* ------------------------------ 小工具 ------------------------------ */
+/* ⚠️ $ / $$ 的返回值**故意不标类型**（tsc 现在从 root.querySelector 推出来就是 any）。
+   同一个 helper 要服务 input / textarea / select / div…，写成任何一个具体元素类型，
+   另一半的 .value / .files 就会报错，被逼着到处写断言反而更糟。
+   所以类型加在**数据**上（见上面那一段 @typedef），不加在 DOM 查询上。 */
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+/**
+ * HTML 转义。入参写成 unknown 是有意的：调用点会传字符串、数字、null，
+ * 函数体本来就先 String() 一遍 —— 这样它拦的是"忘了转义"，而不是"传了个数字"。
+ * @param {unknown} [s]
+ * @returns {string}
+ */
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/** @param {number} ts 毫秒时间戳 @returns {string} */
 function timeAgo(ts) {
   const sec = Math.max(0, (Date.now() - ts) / 1000);
   if (sec < 60) return '刚刚';
@@ -23,6 +289,7 @@ function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('zh-CN');
 }
 
+/** @param {unknown} text @param {number} n @returns {string} */
 function excerpt(text, n) {
   const one = String(text).replace(/\s+/g, ' ').trim();
   return one.length > n ? one.slice(0, n) + '…' : one;
@@ -31,12 +298,14 @@ function excerpt(text, n) {
 const AVATAR_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b',
                        '#ef4444', '#8b5cf6', '#14b8a6', '#ec4899'];
 
+/** @param {string} name @returns {{color: string, initial: string}} */
 function avatarOf(name) {
   let h = 0;
   for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) % 9973;
   return { color: AVATAR_COLORS[h % AVATAR_COLORS.length], initial: [...String(name)][0] || '?' };
 }
 
+/** @param {AuthorRef|null} user @param {number|null} [ts] @param {string} [size] @returns {string} */
 function userChip(user, ts, size = '') {
   const name = (user && user.name) || '匿名用户';
   const a = avatarOf(name);
@@ -55,26 +324,35 @@ function userChip(user, ts, size = '') {
    ⚠️ 阈值一律写成"和某个角色比"，不要写死数字 —— 之前 role_level 的数字被
       当成阈值散在好几处，加「组员」这一层时差点让组员拿到管理者权限。
    ------------------------------------------------------------------ */
+/** @type {Record<Role, string>} */
 const ROLE_LABEL = {
   user: '普通用户', member: '组员', admin: '管理者', super_admin: '大管理者',
 };
+/** @type {Record<Role, number>} */
 const ROLE_LEVEL = { user: 1, member: 2, admin: 3, super_admin: 4 };
 /** 「至少是管理者」的层级。别写死数字，加层级时只改 ROLE_LEVEL 一处。 */
 const ADMIN_LEVEL = ROLE_LEVEL.admin;
 /** 「至少是组员」的层级 —— 真名从这一档起才给（见 weekly_stats 里的判断）。 */
 const MEMBER_LEVEL = ROLE_LEVEL.member;
 
+/** @param {{role?: Role}|null} [u] 只要带 role 就行，作者 / 成员目录的行都吃 @returns {number} */
 const levelOf = u => ROLE_LEVEL[(u && u.role) || 'user'] || 1;
+/** @returns {number} */
 const myLevel = () => ROLE_LEVEL[(me && me.role) || 'user'] || 1;
 
+/** @param {{role?: Role}|null} [u] @returns {string} */
 const roleBadge = u => {
   const r = (u && u.role) || 'user';
   return r === 'user' ? '' : `<span class="role-badge role-${r}">${ROLE_LABEL[r]}</span>`;
 };
 
-/* 我能不能管这个人：大管理者管所有人；其余人只能管**级别严格比自己低**的
-   （所以管理者之间互不管理，管理者也管不了大管理者）
-   —— 用相对比较而不是写死的数字，加层级时自动跟着走。 */
+/**
+ * 我能不能管这个人：大管理者管所有人；其余人只能管**级别严格比自己低**的
+ * （所以管理者之间互不管理，管理者也管不了大管理者）
+ * —— 用相对比较而不是写死的数字，加层级时自动跟着走。
+ * @param {AuthorRef|null} [u]
+ * @returns {boolean}
+ */
 function canManage(u) {
   if (!me || !u || !u.id || u.id === me.id) return false;
   if (me.role === 'super_admin') return true;
@@ -91,6 +369,12 @@ function toast(msg) {
 }
 
 /* ------------------- 把后端返回的英文报错翻译成人话 ------------------- */
+/**
+ * 参数只描述我们真正会读的那几个字段：调用点传进来的 err 来自 catch / SDK，
+ * 形状不固定，这里本来就是按鸭子类型读 —— 读到哪个算哪个。
+ * @param {{message?: string, error_description?: string, msg?: string, hint?: string}} e
+ * @returns {ErrInfo}
+ */
 function explain(e) {
   const raw = (e && (e.message || e.error_description || e.msg || e.hint)) || String(e);
   const m = String(raw).toLowerCase();
@@ -133,6 +417,7 @@ function explain(e) {
 }
 
 /* 拼错误提示：没有 detail 时不要留个多余的冒号 */
+/** @param {ErrInfo} ex @returns {string} */
 const errMsg = ex => (ex.detail ? ex.title + '：' + ex.detail : ex.title);
 
 /* ------------------------------ 连接后端 ------------------------------ */
@@ -149,17 +434,28 @@ if (!CFG.SUPABASE_URL || !CFG.SUPABASE_KEY) {
 }
 
 /* ------------------------------ 状态 ------------------------------ */
-let me = null;              // { id, name, email } | null
-let questions = [];         // 问题列表（来自 questions_view）
-let myVotes = new Set();    // 'q:<id>' / 'a:<id>'
-let myBookmarks = new Set();// 我收藏的问题 id（只有自己看得到）
-let notices = [];           // 站内通知（只有自己看得到）
-let identities = [];        // 当前账号绑定了哪些登录方式
-let myAnswers = [];         // 我回答过的（「我的」页面）
-let myViews = [];           // 最近 30 天的浏览记录
-let userAnswers = [];       // 正在看的**别人**的回答（#/u/<id> 主页）
-let members = [];           // 成员目录（所有登录用户可看）
-let currentQuestion = null; // 当前正在看的问题（编辑时要从这里取原文）
+/** @type {Me|null} 当前登录用户；null = 未登录 */
+let me = null;
+/** @type {Question[]} 问题列表（来自 questions_view） */
+let questions = [];
+/** @type {Set<string>} 'q:<id>' / 'a:<id>' */
+let myVotes = new Set();
+/** @type {Set<string>} 我收藏的问题 id（只有自己看得到） */
+let myBookmarks = new Set();
+/** @type {Notice[]} 站内通知（只有自己看得到） */
+let notices = [];
+/** @type {Identity[]} 当前账号绑定了哪些登录方式 */
+let identities = [];
+/** @type {Answer[]} 我回答过的（「我的」页面） */
+let myAnswers = [];
+/** @type {ViewRecord[]} 最近 30 天的浏览记录 */
+let myViews = [];
+/** @type {Answer[]} 正在看的**别人**的回答（#/u/<id> 主页） */
+let userAnswers = [];
+/** @type {Profile[]} 成员目录（所有登录用户可看） */
+let members = [];
+/** @type {QuestionDetail|null} 当前正在看的问题（编辑时要从这里取原文） */
+let currentQuestion = null;
 
 /* ============================================================================
    自定义外观
@@ -186,6 +482,7 @@ try {
   }
 } catch (_) { /* 无所谓 */ }
 
+/** @type {ThemeConfig} 站点默认外观；也是"缺字段时"的兜底值 */
 const THEME_DEFAULTS = {
   primary: '',             // 空 = 用主题自带的颜色
   scheme: 'system',        // system | light | dark
@@ -230,8 +527,10 @@ const JS_SNIPPETS = [
    会报 "Cannot access 'themePlugin' before initialization"，页面直接卡住。
    （函数声明会提升，所以函数留在下面那一节没问题。）
    —— 同一个坑踩过两次了（之前是 renderList 里的 empty）。 */
-let hotPlugin = null;      // 插件①：替换「热门」排序的打分
-let themePlugin = null;    // 插件②：生成整站外观（CSS）
+/** @type {((votes: number, answers: number, views: number, ageDays: number) => number)|null} 插件①：替换「热门」排序的打分 */
+let hotPlugin = null;
+/** @type {((i: number) => number)|null} 插件②：生成整站外观（CSS） */
+let themePlugin = null;
 /* 插件③：搜索相关度打分。这是第一个**要吃字符串**的插件，所以和上面两个
    有本质区别 —— 数字 ABI 任何语言都能过，字符串要额外一套传输方式：
      · JS / TypeScript / ReScript / Python：原生就有字符串，直接调
@@ -239,6 +538,7 @@ let themePlugin = null;    // 插件②：生成整站外观（CSS）
        它的线性内存，再传两个长度进去
    这里的 searchPlugin 是已经**统一好的** (query, text) => number，上层不用管
    底下是哪种传输方式。null = 没插件或插件不支持。 */
+/** @type {((query: string, text: string) => number)|null} */
 let searchPlugin = null;
 /* 八种语言现在**全都**支持这个协议了，包括 MoonBit。
    MoonBit 那两份工作是在插件侧做的（moon.pkg 里配 export-memory-name 导出内存，
@@ -246,6 +546,7 @@ let searchPlugin = null;
    ⚠️ 教训留在这儿：我一度以为 MoonBit 做不到，因为它的标准库确实没有取地址的
       接口 —— 但那是只查了 API、没查构建配置。详见 plugins/README.md。 */
 
+/** @type {ThemeSlot[]} */
 const THEME_SLOTS = [
   { i: 0, name: '主题色 色相',   lo: 0,   hi: 360,  dflt: 245 },
   { i: 1, name: '主题色 饱和度', lo: 0,   hi: 1,    dflt: 0.8 },
@@ -266,6 +567,7 @@ const THEME_SLOTS = [
    applyTheme() 在模块加载时就调用，文件后面的 const 那时还在 TDZ 里。 */
 const SLOT_SCHEME = 8;
 
+/** @type {ThemeConfig} 当前生效的外观（默认值 + 本地存的那份） */
 let theme = { ...THEME_DEFAULTS };
 
 function loadTheme() {
@@ -481,11 +783,13 @@ function swTx(mode, fn) {
 }
 
 const swGet = key => swTx('readonly', s => s.get(key));
+/** @param {SwOverride} rec */
 const swPut = rec => swTx('readwrite', s => s.put(rec));
 const swDel = key => swTx('readwrite', s => s.delete(key));
 const swAll = () => swTx('readonly', s => s.getAll());
 const swClearAll = () => swTx('readwrite', s => s.clear());
 
+/** @param {string} text @returns {Promise<string>} 十六进制摘要；非安全上下文下返回空串 */
 async function sha256(text) {
   try {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -497,6 +801,7 @@ async function sha256(text) {
 
 /* 取**线上原版**：加 qa-raw 让 sw.js 放行。
    不加的话，用户改了 app.js 之后就再也拿不到原版来比对了。 */
+/** @param {string} key @returns {Promise<string|null>} 线上原版；取不到返回 null */
 async function fetchRaw(key) {
   try {
     const res = await fetch(key + '?' + SW_RAW + '=' + Date.now(), { cache: 'no-store' });
@@ -527,6 +832,7 @@ async function swUninstall() {
 }
 
 /* 保存一份本地改动。baseHash 记的是**改动时线上版**的哈希，用于日后判断过期。 */
+/** @param {string} key @param {string} text @returns {Promise<void>} */
 async function swSaveOverride(key, text) {
   const raw = await fetchRaw(key);
   const baseHash = raw == null ? '' : await sha256(raw);
@@ -548,6 +854,7 @@ async function swCheckStale() {
   swStale = out;
 }
 
+/** @type {SrcFile[]} */
 const SRC_FILES = [
   {
     key: 'styles.css',
@@ -599,6 +906,7 @@ const SELECTOR_HELP = [
   { sel: '.rowcard',     label: '「我的」里的条目' },
 ];
 
+/** @param {string} key @returns {Promise<string>} */
 async function loadSrc(key) {
   if (srcCache[key] !== undefined) return srcCache[key];
   try {
@@ -612,6 +920,7 @@ async function loadSrc(key) {
 
 /* 本地拦截器那一块 UI：安装 / 卸载 / 过期警告 / 还原。
    单独抽出来是因为它在三个文件之间都要显示，而且状态比较多。 */
+/** @param {SrcFile} f @param {boolean} canEdit @returns {Promise<void>} */
 async function renderSwBox(f, canEdit) {
   const box = $('#src-sw-box');
   if (!box) return;
@@ -741,6 +1050,12 @@ function renderSnippets() {
 }
 /* memberRole / memberName 是成员目录的两个筛选维度（身份 / 名字）；
    参赛年数用 memberYears。三个维度都是纯前端筛选，不改数据库。 */
+/**
+ * 界面状态。filter / meTab / themeTab 用联合类型而不是 string ——
+ * 这三处的取值会被 switch / if 反复比较，写成 'hott' 这种拼错能被立刻抓住。
+ * @type {{filter: FilterKey, tag: string|null, q: string, meTab: MeTab, themeTab: ThemeTab,
+ *         memberSort: string, memberYears: string, memberRole: string, memberName: string}}
+ */
 const ui = {
   filter: 'new', tag: null, q: '', meTab: 'questions', themeTab: 'basic',
   memberSort: 'week', memberYears: 'all', memberRole: 'all', memberName: '',
@@ -748,10 +1063,13 @@ const ui = {
 let lastViewedId = null;
 let authMode = 'login';
 
+/** @param {string} kind 'q' | 'a' @param {string} id @returns {boolean} */
 const hasVoted = (kind, id) => myVotes.has(kind + ':' + id);
+/** @param {AuthorRef|null} [u] @returns {boolean} */
 const isMine = u => !!(me && u && me.id === u.id);
 
 /* 列表卡片上的小星星 */
+/** @param {string} id @returns {string} */
 const starBtn = id => {
   const on = myBookmarks.has(id);
   return `<button class="star ${on ? 'is-on' : ''}" data-action="bookmark" data-q="${id}"
@@ -759,6 +1077,7 @@ const starBtn = id => {
 };
 
 /* 详情页上的收藏按钮 */
+/** @param {string} id @returns {string} */
 const bookmarkBtn = id => {
   const on = myBookmarks.has(id);
   return `<button class="vote-btn ${on ? 'is-on' : ''}" data-action="bookmark" data-q="${id}">
@@ -766,6 +1085,11 @@ const bookmarkBtn = id => {
 };
 
 /* ------------------------------ 数据接口 ------------------------------ */
+/**
+ * 把 questions_view 的一行转成界面用的 Question（snake_case → camelCase）。
+ * @param {QuestionRow} r
+ * @returns {Question}
+ */
 const mapQuestion = r => ({
   id: r.id,
   title: r.title,
@@ -782,6 +1106,11 @@ const mapQuestion = r => ({
   author: r.author || { id: null, name: '匿名用户', role: 'user' },
 });
 
+/**
+ * 把 answers_view 的一行转成界面用的 Answer。
+ * @param {AnswerRow} r
+ * @returns {Answer}
+ */
 const mapAnswer = r => ({
   id: r.id,
   questionId: r.question_id,
@@ -795,6 +1124,7 @@ const mapAnswer = r => ({
 });
 
 const api = {
+  /** @returns {Promise<Question[]>} 全部问题（新的在前），同时刷新模块级缓存 questions */
   async list() {
     const { data, error } = await sb.from('questions_view')
       .select('*')
@@ -804,6 +1134,7 @@ const api = {
     return questions;
   },
 
+  /** @param {string} id @returns {Promise<QuestionDetail|null>} 一条问题 + 它的全部回答 */
   async get(id) {
     const { data, error } = await sb.from('questions_view')
       .select('*').eq('id', id).maybeSingle();
@@ -817,6 +1148,7 @@ const api = {
     return { ...mapQuestion(data), answers: rows.map(mapAnswer) };
   },
 
+  /** @returns {Promise<void>} */
   async loadMyVotes() {
     myVotes = new Set();
     if (!me) return;
@@ -829,6 +1161,7 @@ const api = {
   },
 
   /* 收藏：表还没建好时不影响其它功能，只是收藏用不了 */
+  /** @returns {Promise<void>} */
   async loadMyBookmarks() {
     myBookmarks = new Set();
     if (!me) return;
@@ -842,6 +1175,7 @@ const api = {
     }
   },
 
+  /** @param {string} questionId @returns {Promise<void>} 收藏 / 取消收藏（看当前状态） */
   async toggleBookmark(questionId) {
     if (myBookmarks.has(questionId)) {
       const { error } = await sb.from('bookmarks')
@@ -857,6 +1191,7 @@ const api = {
   },
 
   /* 登录方式（身份绑定）：读的是 auth 里的 identities，不经过我们的表 */
+  /** @returns {Promise<void>} */
   async loadIdentities() {
     identities = [];
     try {
@@ -870,6 +1205,7 @@ const api = {
 
   /* ---- 「我的」页面 ---- */
   /* 某个人的回答（自己或别人都走这里）—— 看别人主页时复用同一段取数逻辑 */
+  /** @param {string} userId @returns {Promise<Answer[]>} */
   async listAnswersBy(userId) {
     const { data, error } = await sb.from('answers_view')
       .select('*').eq('author_id', userId).order('created_at', { ascending: false });
@@ -877,10 +1213,12 @@ const api = {
     return data.map(mapAnswer);
   },
 
+  /** @returns {Promise<void>} */
   async listMyAnswers() {
     myAnswers = await api.listAnswersBy(me.id);
   },
 
+  /** @returns {Promise<void>} */
   async listMyViews() {
     // 只取最近 30 天
     const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
@@ -898,18 +1236,21 @@ const api = {
   },
 
   /* ---- 角色 / 管理动作（全部走数据库函数，函数里会再检查一次权限）---- */
+  /** @param {string} questionId @param {QuestionStatus} status @returns {Promise<void>} */
   async setQuestionStatus(questionId, status) {
     const { error } = await sb.rpc('set_question_status',
       { p_question_id: questionId, p_status: status });
     if (error) throw error;
   },
 
+  /** @param {string} questionId @param {string} reason @returns {Promise<void>} */
   async adminDeleteQuestion(questionId, reason) {
     const { error } = await sb.rpc('admin_delete_question',
       { p_question_id: questionId, p_reason: reason });
     if (error) throw error;
   },
 
+  /** @param {string} answerId @param {string} reason @returns {Promise<void>} */
   async adminDeleteAnswer(answerId, reason) {
     const { error } = await sb.rpc('admin_delete_answer',
       { p_answer_id: answerId, p_reason: reason });
@@ -917,6 +1258,7 @@ const api = {
   },
 
   /* 改标签：本人和"管得到他"的管理者都能调，权限在数据库函数里再查一遍 */
+  /** @param {string} questionId @param {string[]} tags @returns {Promise<string[]>} 清洗后的标签（数据库那边也会再洗一遍） */
   async setQuestionTags(questionId, tags) {
     const { data, error } = await sb.rpc('set_question_tags',
       { p_question_id: questionId, p_tags: tags });
@@ -925,34 +1267,40 @@ const api = {
   },
 
   /* 编辑自己的内容（只有作者本人能调，数据库函数里再查一遍） */
+  /** @param {string} questionId @param {string} title @param {string} body @returns {Promise<void>} */
   async updateQuestion(questionId, title, body) {
     const { error } = await sb.rpc('update_question',
       { p_question_id: questionId, p_title: title, p_body: body });
     if (error) throw error;
   },
 
+  /** @param {string} answerId @param {string} body @returns {Promise<void>} */
   async updateAnswer(answerId, body) {
     const { error } = await sb.rpc('update_answer',
       { p_answer_id: answerId, p_body: body });
     if (error) throw error;
   },
 
+  /** @param {string} userId @param {string} text @returns {Promise<void>} */
   async sendReminder(userId, text) {
     const { error } = await sb.rpc('send_reminder', { p_user_id: userId, p_text: text });
     if (error) throw error;
   },
 
+  /** @param {string} userId @param {Role} role @returns {Promise<void>} 只有大管理者能调（数据库函数里再查一遍） */
   async setUserRole(userId, role) {
     const { error } = await sb.rpc('set_user_role', { p_user_id: userId, p_role: role });
     if (error) throw error;
   },
 
   /* 踢成员（硬删：账号 + 他的所有内容）。只有大管理者能调。 */
+  /** @param {string} userId @returns {Promise<void>} */
   async kickMember(userId) {
     const { error } = await sb.rpc('kick_member', { p_user_id: userId });
     if (error) throw error;
   },
 
+  /** @returns {Promise<void>} 结果写进模块级 members */
   async listMembers() {
     // 成员目录：昵称 / 身份 / 参赛年数 / 本周与累计统计。所有登录用户都能调；
     // **真名由数据库按角色决定**（普通用户拿到的是 null；组员及以上才有），
@@ -965,6 +1313,7 @@ const api = {
 
   /* 改资料走函数：参赛年数保存时要同时记下「哪一年填的」（跨年自动 +1 的基准），
      直接 update 表会绕过这一步，把已经涨上去的一岁吃掉。 */
+  /** @param {ProfileUpdate} fields @returns {Promise<void>} */
   async updateProfile(fields) {
     const { error } = await sb.rpc('update_profile', {
       p_display_name: fields.display_name,
@@ -974,6 +1323,7 @@ const api = {
     if (error) throw error;
   },
 
+  /** @param {string|null} text @returns {Promise<number>} 被提醒到的人数 */
   async remindIncomplete(text) {
     const { data, error } = await sb.rpc('remind_incomplete', { p_text: text });
     if (error) throw error;
@@ -981,6 +1331,7 @@ const api = {
   },
 
   /* 角色可能被大管理者改掉，登录状态下定期刷一下 */
+  /** @returns {Promise<void>} */
   async refreshMe() {
     if (!me) return;
     try {
@@ -995,6 +1346,7 @@ const api = {
   },
 
   /* 通知：和收藏一样，表还没建好时不影响其它功能 */
+  /** @returns {Promise<void>} 结果写进模块级 notices */
   async loadNotices() {
     notices = [];
     if (!me) return;
@@ -1017,17 +1369,20 @@ const api = {
     }
   },
 
+  /** @param {string} id @returns {Promise<void>} */
   async markNoticeRead(id) {
     const { error } = await sb.from('notifications').update({ is_read: true }).eq('id', id);
     if (error) throw error;
   },
 
+  /** @returns {Promise<void>} */
   async markAllNoticesRead() {
     const { error } = await sb.from('notifications')
       .update({ is_read: true }).eq('user_id', me.id).eq('is_read', false);
     if (error) throw error;
   },
 
+  /** @param {{title: string, body: string, tags: string[]}} q @returns {Promise<string>} 新问题的 id */
   async createQuestion({ title, body, tags }) {
     const { data, error } = await sb.from('questions')
       .insert({ title, body, tags, author_id: me.id })
@@ -1036,12 +1391,14 @@ const api = {
     return data.id;
   },
 
+  /** @param {string} questionId @param {string} body @returns {Promise<void>} */
   async addAnswer(questionId, body) {
     const { error } = await sb.from('answers')
       .insert({ question_id: questionId, author_id: me.id, body });
     if (error) throw error;
   },
 
+  /** @param {string} questionId @param {string|null} answerId 回答点赞传 answerId，问题点赞传 null @returns {Promise<void>} */
   async vote(questionId, answerId) {
     const key = answerId ? 'a:' + answerId : 'q:' + questionId;
     const table = answerId ? 'answer_votes' : 'question_votes';
@@ -1059,6 +1416,7 @@ const api = {
     }
   },
 
+  /** @param {string} questionId @param {string} answerId @returns {Promise<void>} */
   async accept(questionId, answerId) {
     const { error } = await sb.rpc('accept_answer', {
       p_question_id: questionId,
@@ -1067,16 +1425,19 @@ const api = {
     if (error) throw error;
   },
 
+  /** @param {string} id @returns {Promise<void>} */
   async removeQuestion(id) {
     const { error } = await sb.from('questions').delete().eq('id', id);
     if (error) throw error;
   },
 
+  /** @param {string} id @returns {Promise<void>} */
   async removeAnswer(id) {
     const { error } = await sb.from('answers').delete().eq('id', id);
     if (error) throw error;
   },
 
+  /** @param {string} id @returns {Promise<void>} 失败不影响页面（调用点自己 catch 掉） */
   async bumpViews(id) {
     await sb.rpc('increment_views', { p_question_id: id });
   },
@@ -1090,6 +1451,7 @@ function requireLogin() {
 }
 
 /* ------------------------------ 登录状态 ------------------------------ */
+/** @param {{user?: SessionUser}|null} session @returns {Promise<void>} */
 async function applySession(session) {
   /* 退出 / 换账号时把成员目录缓存清掉：
      目录里真名给不给是**按当前角色**决定的（数据库返回，前端再挡一道），
@@ -1104,7 +1466,11 @@ async function applySession(session) {
   const md = u.user_metadata || {};
   let name = md.display_name || md.user_name || md.preferred_username || md.full_name || md.name
     || (u.email || '').split('@')[0] || '匿名用户';
-  let role = 'user', realName = '', compYears = null;
+  /* role 来自数据库函数 my_profile()，只可能是四个角色之一；
+     标上 Role 是为了让下面 `role = row.role` 和 me.role 对得上。 */
+  /** @type {Role} */
+  let role = 'user';
+  let realName = '', compYears = null;
 
   // 用函数读自己的资料：真名和参赛年数没有开放列级查询权限，只能走这个函数
   try {
@@ -1428,8 +1794,14 @@ async function openMembers() {
 function closeMembers() { $('#members-mask').classList.add('hidden'); }
 
 /* ------------------------------ 编辑自己的提问 / 回答 ------------------------------ */
-let editTarget = null;   // { kind: 'question' | 'answer', id }
+/** @type {{kind: 'question'|'answer', id: string}|null} */
+let editTarget = null;
 
+/**
+ * @param {'question'|'answer'} kind
+ * @param {string} id
+ * @param {{title?: string, body: string}} data 问题带 title，回答不带；两者都有 body
+ */
 function openEdit(kind, id, data) {
   editTarget = { kind, id };
   const isQ = kind === 'question';
@@ -1492,7 +1864,11 @@ function renderMembers() {
   }
 
   /* ---- 排序：本周活跃 / 提问数 / 回答数 / 参赛年份 / 姓名 ---- */
+  /** @param {number|null} v @returns {number} */
   const num = v => (v === null || v === undefined ? -1 : Number(v));
+  /* 标上 Profile 是为了让下面这些字段名（weekly_stats 返回的 snake_case）
+     拼错时能被抓住 —— 这一组统计字段最容易写错。 */
+  /** @type {Record<string, (a: Profile, b: Profile) => number>} */
   const sorters = {
     week:      (a, b) => (b.questions_this_week + b.answers_this_week) - (a.questions_this_week + a.answers_this_week),
     questions: (a, b) => num(b.questions_total) - num(a.questions_total),
@@ -1726,7 +2102,9 @@ function pluginKind() {
 /* ------------------------------- Python 后端 -------------------------------
    整页只加载一次 Pyodide，之后所有 Python 插件复用它。 */
 const PYODIDE_INDEX = 'https://cdn.jsdelivr.net/pyodide/v0.27.2/full/';
+/** @type {PyodideLike|null} 整页只加载一次，之后复用 */
 let pyodide = null;
+/** @type {Promise<PyodideLike>|null} 正在加载中的那一次（避免并发重复加载） */
 let pyodideLoading = null;
 
 function loadScriptOnce(src) {
@@ -1950,6 +2328,7 @@ function renderPluginStatus() {
 
 /* 热门排序打分：上传了插件就用插件，否则用站点默认公式。
    注意：**站点默认必须保持不变**，否则没上传插件的人也会受影响。 */
+/** @param {Question} q @returns {number} */
 function heat(q) {
   if (hotPlugin) {
     try {
@@ -1960,12 +2339,14 @@ function heat(q) {
   return q.votes * 3 + q.answerCount * 5 + q.views / 100;
 }
 
+/** @returns {[string, number][]} 标签 → 出现次数，多的在前 */
 function tagCounts() {
   const counts = new Map();
   questions.forEach(q => q.tags.forEach(t => counts.set(t, (counts.get(t) || 0) + 1)));
   return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 }
 
+/** @returns {Question[]} 当前筛选 / 搜索 / 排序之后要显示的问题 */
 function visibleQuestions() {
   let list = questions.slice();
 
@@ -1996,8 +2377,10 @@ function visibleQuestions() {
 }
 
 /* 搜索结果的文本（和内置子串匹配用的是同一份，保证两边看到的是一回事） */
+/** @param {Question} q @returns {string} */
 const searchTextOf = q => q.title + '\n' + q.body + '\n' + q.tags.join(' ');
 
+/** @param {Question[]} list @param {string} query @returns {Question[]} */
 function rankBySearchPlugin(list, query) {
   try {
     const scored = list.map(q => {
@@ -2111,6 +2494,7 @@ async function renderMy() {
   await renderUserPage(me.id, { isSelf: true });
 }
 
+/** @param {string} userId @returns {Promise<void>} */
 async function renderUser(userId) {
   /* ⚠️ 这里**不要求登录**：提问和回答本来就是对所有人公开的（未登录也能看问题
      列表和详情）。登录与否只影响顶部那块基本资料 —— 昵称 / 身份 / 参赛年数来自
@@ -2122,6 +2506,11 @@ async function renderUser(userId) {
    null，所以自然不会显示）。数据来自成员目录，拉不到就退化成只有昵称。
    ⚠️ 真名这里再挡一道角色判断：数据库对普通用户 / 未登录返回的就是 null，
       但万一内存里留着上一任（管理者）的旧数组，也不该把它画出来。 */
+/**
+ * @param {string} userId
+ * @param {Answer[]} answers
+ * @returns {string}
+ */
 function memberHead(userId, answers) {
   const m = members.find(x => x.user_id === userId);
   const anyQ = questions.find(x => x.authorId === userId);
@@ -2148,6 +2537,7 @@ function memberHead(userId, answers) {
   </div>`;
 }
 
+/** @param {string} userId @param {{isSelf: boolean}} opts @returns {Promise<void>} */
 async function renderUserPage(userId, { isSelf }) {
   const tabsDef = isSelf ? ME_TABS : USER_TABS;
   /* 从「我的」（有浏览记录）切到别人主页时，active tab 可能落在对方没有的那一页 */
@@ -2243,6 +2633,7 @@ async function renderUserPage(userId, { isSelf }) {
 }
 
 /* ------------------------------ 页面：详情 ------------------------------ */
+/** @param {QuestionDetail|null} q */
 function renderDetail(q) {
   if (!q) {
     $('#app').innerHTML = `
@@ -2465,7 +2856,11 @@ async function route() {
 
 /* ------------------------------ 点击事件 ------------------------------ */
 document.addEventListener('click', async e => {
-  const el = e.target.closest('[data-action]');
+  /* DOM 库把 e.target 一律标成 EventTarget（因为同一个事件可能落在文本节点、
+     window 等地方），但点击事件的目标一定是元素。这两行断言只是把浏览器
+     的实际约定写下来，不产生任何运行时行为。 */
+  const target = /** @type {HTMLElement} */ (e.target);
+  const el = /** @type {HTMLElement|null} */ (target.closest('[data-action]'));
   if (!el) return;
   const action = el.dataset.action;
 
@@ -2478,7 +2873,8 @@ document.addEventListener('click', async e => {
         break;
 
       case 'filter':
-        ui.filter = el.dataset.filter;
+        /* data-filter 的值是 renderList 自己写上去的那几个，断言只是把这件事写明 */
+        ui.filter = /** @type {FilterKey} */ (el.dataset.filter);
         renderList();
         break;
 
@@ -2514,7 +2910,7 @@ document.addEventListener('click', async e => {
         break;
 
       case 'theme-tab': {
-        ui.themeTab = el.dataset.tab;
+        ui.themeTab = /** @type {ThemeTab} */ (el.dataset.tab);
         switchThemePane();
         if (ui.themeTab === 'source') await renderSrc();
         if (ui.themeTab === 'plugin') renderPluginStatus();
@@ -2664,14 +3060,15 @@ document.addEventListener('click', async e => {
         break;
 
       case 'me-tab':
-        ui.meTab = el.dataset.tab;
+        ui.meTab = /** @type {MeTab} */ (el.dataset.tab);
         /* 「我的」和成员主页共用同一套标签页渲染，所以这里按当前路由分派 */
         if (location.hash.startsWith('#/u/')) await renderUser(decodeURIComponent(location.hash.slice(4)));
         else await renderMy();
         break;
 
       case 'toggle-status':
-        await api.setQuestionStatus(el.dataset.q, el.dataset.status);
+        /* data-status 是渲染时按 q.status 反过来写死的，只有 open / solved 两种 */
+        await api.setQuestionStatus(el.dataset.q, /** @type {QuestionStatus} */ (el.dataset.status));
         await api.list();
         await route();
         toast(el.dataset.status === 'solved' ? '已标记为已解决' : '已改回待回答');
@@ -2763,7 +3160,8 @@ document.addEventListener('click', async e => {
       }
 
       case 'set-role': {
-        const role = el.dataset.role;
+        /* data-role 是 renderMembers 按 ROLE_LABEL 的键生成的，只可能是四个角色之一 */
+        const role = /** @type {Role} */ (el.dataset.role);
         if (!confirm(`把「${el.dataset.name}」设为「${ROLE_LABEL[role]}」？`)) return;
         await api.setUserRole(el.dataset.u, role);
         await api.listMembers();
@@ -2862,7 +3260,9 @@ document.addEventListener('click', async e => {
         break;
 
       case 'link-github': {
-        el.disabled = true;
+        // 这个按钮是 index.html 里的 <button>，但事件委托拿到的只是 HTMLElement
+        const btn = /** @type {HTMLButtonElement} */ (el);
+        btn.disabled = true;
         try {
           // 成功的话浏览器会跳到 GitHub 去授权，回来时就已经绑好了
           const { error } = await sb.auth.linkIdentity({
@@ -2875,7 +3275,7 @@ document.addEventListener('click', async e => {
           const hint = $('#identity-hint');
           hint.textContent = errMsg(ex);
           hint.classList.add('is-error');
-          el.disabled = false;
+          btn.disabled = false;
         }
         break;
       }
@@ -2952,13 +3352,16 @@ $('#theme-mask').addEventListener('click', e => {
 
 /* 外观面板：拖动滑杆 / 改颜色 → 立刻生效 + 立刻存本地 */
 document.addEventListener('input', e => {
-  const id = e.target.id;
-  if (id === 'theme-primary') theme.primary = e.target.value;
-  else if (id === 'theme-font') { theme.font = Number(e.target.value); $('#theme-font-val').textContent = theme.font + 'px'; }
-  else if (id === 'theme-radius') { theme.radius = Number(e.target.value); $('#theme-radius-val').textContent = theme.radius + 'px'; }
-  else if (id === 'theme-width') { theme.width = Number(e.target.value); $('#theme-width-val').textContent = theme.width + 'px'; }
-  else if (id === 'theme-css') { theme.css = e.target.value; updateThemeConflict(); }
-  else if (id === 'theme-js') theme.js = e.target.value;
+  /* 这一个监听同时服务 <input>（颜色 / 滑杆）和 <textarea>（自定义 CSS / JS、
+     源码编辑器），两者都有 .id 和 .value —— 联合类型就够了。 */
+  const t = /** @type {HTMLInputElement|HTMLTextAreaElement} */ (e.target);
+  const id = t.id;
+  if (id === 'theme-primary') theme.primary = t.value;
+  else if (id === 'theme-font') { theme.font = Number(t.value); $('#theme-font-val').textContent = theme.font + 'px'; }
+  else if (id === 'theme-radius') { theme.radius = Number(t.value); $('#theme-radius-val').textContent = theme.radius + 'px'; }
+  else if (id === 'theme-width') { theme.width = Number(t.value); $('#theme-width-val').textContent = theme.width + 'px'; }
+  else if (id === 'theme-css') { theme.css = t.value; updateThemeConflict(); }
+  else if (id === 'theme-js') theme.js = t.value;
   else if (id === 'src-editor') {
     /* ⚠️ 编辑框里显示的是哪个文件，决定这次输入该存到哪 ——
        不能一律当成 styles.css，不然改 app.js 会污染外观设置。 */
@@ -2968,14 +3371,14 @@ document.addEventListener('input', e => {
       // 防抖 800ms，且**不刷新页面** —— 刷新了会把自己的编辑冲掉
       clearTimeout(srcApplyTimer);
       srcApplyTimer = setTimeout(async () => {
-        await swSaveOverride(srcCurrent, e.target.value);
+        await swSaveOverride(srcCurrent, t.value);
         const st = $('#src-status');
         if (st) st.textContent = '已保存到本地覆盖（刷新后生效）';
       }, 800);
       return;
     }
     // styles.css：源码编辑器里有近千行，每敲一个字都重解析会卡 —— 防抖 400ms
-    theme.css = e.target.value;
+    theme.css = t.value;
     updateThemeConflict();
     clearTimeout(srcApplyTimer);
     srcApplyTimer = setTimeout(() => { applyTheme(); saveTheme(); }, 400);
@@ -2988,13 +3391,16 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('change', async e => {
-  if (e.target.id === 'theme-scheme') { theme.scheme = e.target.value; applyTheme(); saveTheme(); }
-  if (e.target.id === 'theme-density') { theme.density = e.target.value; applyTheme(); saveTheme(); }
+  /* 同上：一个监听同时服务 <select>（明暗 / 密度）和 <input type=file>（插件）。 */
+  const t = /** @type {HTMLSelectElement|HTMLInputElement} */ (e.target);
+  if (t.id === 'theme-scheme') { theme.scheme = /** @type {ThemeScheme} */ (t.value); applyTheme(); saveTheme(); }
+  if (t.id === 'theme-density') { theme.density = /** @type {Density} */ (t.value); applyTheme(); saveTheme(); }
 
   /* 上传自己的插件（.wasm 或 .js）：先试跑一遍，能跑才存进本地 */
-  if (e.target.id === 'plugin-file') {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = '';                       // 允许重复选同一个文件
+  if (t.id === 'plugin-file') {
+    const input = /** @type {HTMLInputElement} */ (t);   // .files 只有 input 有
+    const file = input.files && input.files[0];
+    input.value = '';                          // 允许重复选同一个文件
     if (!file) return;
 
     if (file.size > 512 * 1024) {
@@ -3059,20 +3465,23 @@ document.addEventListener('change', async e => {
 
 /* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */
 document.addEventListener('change', e => {
-  if (e.target.id === 'member-sort') { ui.memberSort = e.target.value; renderMembers(); }
-  if (e.target.id === 'member-years') { ui.memberYears = e.target.value; renderMembers(); }
-  if (e.target.id === 'member-role') { ui.memberRole = e.target.value; renderMembers(); }
+  const t = /** @type {HTMLSelectElement|HTMLInputElement} */ (e.target);
+  if (t.id === 'member-sort') { ui.memberSort = t.value; renderMembers(); }
+  if (t.id === 'member-years') { ui.memberYears = t.value; renderMembers(); }
+  if (t.id === 'member-role') { ui.memberRole = t.value; renderMembers(); }
 });
 
 /* 名字搜索框：边打边筛，不用回车。
    ⚠️ 只重渲染 #member-list，输入框本身在 .member-toolbar 里，不会被冲掉。 */
 document.addEventListener('input', e => {
-  if (e.target.id === 'member-name') { ui.memberName = e.target.value; renderMembers(); }
+  const t = /** @type {HTMLInputElement} */ (e.target);
+  if (t.id === 'member-name') { ui.memberName = t.value; renderMembers(); }
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
 document.addEventListener('submit', async e => {
-  const form = e.target;
+  /* submit 只可能在 <form> 上触发，但 DOM 库仍按最宽的 EventTarget 标。 */
+  const form = /** @type {HTMLFormElement} */ (e.target);
 
   /* 登录 / 注册 */
   if (form.id === 'auth-form') {
@@ -3139,7 +3548,7 @@ document.addEventListener('submit', async e => {
 
     const fd = new FormData(form);
     const errEl = $('#edit-error');
-    const btn = form.querySelector('button[type=submit]');
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     const original = btn.textContent;
     errEl.classList.add('hidden');
     btn.disabled = true;
@@ -3179,7 +3588,7 @@ document.addEventListener('submit', async e => {
     const compYears = yearsRaw === '' ? null : Number(yearsRaw);
 
     const errEl = $('#profile-error');
-    const btn = form.querySelector('button[type=submit]');
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     const original = btn.textContent;
     errEl.classList.add('hidden');
 
@@ -3271,7 +3680,7 @@ document.addEventListener('submit', async e => {
       .split(/[,，\s]+/).map(s => s.trim()).filter(Boolean).slice(0, 5);
     if (!title || !body) return;
 
-    const btn = form.querySelector('button[type=submit]');
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     btn.disabled = true; btn.textContent = '发布中…';
     try {
       const id = await api.createQuestion({ title, body, tags });
@@ -3293,7 +3702,7 @@ document.addEventListener('submit', async e => {
     const body = String(new FormData(form).get('body') || '').trim();
     if (!body) return;
 
-    const btn = form.querySelector('button[type=submit]');
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     btn.disabled = true; btn.textContent = '发布中…';
     try {
       await api.addAnswer(form.dataset.q, body);

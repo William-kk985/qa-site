@@ -1,0 +1,58 @@
+/* ============================================================================
+   站点自己的类型检查配置 —— 只检查，不产出任何文件，不参与部署。
+   ----------------------------------------------------------------------------
+   怎么跑（先装 Node，见 README「关于 TypeScript」）：
+       npx tsc -p tsconfig.json --noEmit        # 或走本机已有的 tsc
+   ⚠️ 目录里有这个文件时，命令行上别再直接写文件名（会报 error TS5112），
+      要么用 -p tsconfig.json，要么加 --ignoreConfig。
+
+   为什么是这一套（而不是打开 strict）：
+     · allowJs + checkJs + noEmit —— 文件仍然是 .js，浏览器直接跑的是同一份，
+       tsc 只看不写。这就是"零构建"能成立的原因：没有任何产物要部署。
+     · strict: false —— 刻意关掉的。这个代码库大量用 `$('#id').value`
+       （$ 只可能是 any，因为同一个 helper 要服务 input / textarea / select），
+       打开 strictNullChecks 会瞬间多出几百条"对象可能为 null"，
+       绝大多数是这个项目刻意接受的写法 —— 属于噪音。
+       噪音一多就没人看了，检查等于白做。
+     · 那靠什么抓 bug？靠 JSDoc 里的 @typedef（见 app.js 顶部）把
+       Question / Answer / Profile / Notice / ThemeConfig 这些数据结构的形状写死。
+       属性名拼错（TS2551，还会给"Did you mean"）、传错参数、
+       拿一个不存在的字段，全都会被抓住 —— 这些恰恰是真 bug 的高发区。
+     · lib 里给了 DOM：代码用到 crypto.subtle、TextEncoder、serviceWorker、
+       indexedDB、WebAssembly、matchMedia、navigator.clipboard。
+       （CSS 的 :has() 在这里只是普通字符串，不需要 lib 支持。）
+     · types: [] —— 不去自动加载 node_modules/@types。
+       这个站没有依赖，显式清空能保证换台机器、换个 tsc 版本结果一样。
+     · 另外几个开关都是"零噪音、但能挡真 bug"的：
+         noImplicitReturns          有分支忘了 return → 返回 undefined
+         noFallthroughCasesInSwitch switch 少了 break
+         strictFunctionTypes         strict 家族里唯一不产生 null 噪音的那个
+         noImplicitThis             不小心用了没有类型的 this
+         allowUnreachableCode:false  return 之后的死代码
+       故意**没开** noUnusedLocals / noUnusedParameters：那是风格问题不是 bug，
+       而且现在真有一处没用的参数（renderSwBox 的 canEdit），
+       开了就得为了消警告去动运行时代码 —— 不值得。
+
+   files 里只列站点自己的文件。plugins/、tests/、.preview/、vendor/、sw.js
+   都不在检查范围内 —— 尤其 plugins/ts/tsconfig.json 是"用 TS 写示例插件"
+   的独立配置，和这里互不影响。
+   ============================================================================ */
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": [],
+    "strict": false,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "strictFunctionTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowUnreachableCode": false
+  },
+  "files": ["globals.d.ts", "config.js", "app.js"]
+}
