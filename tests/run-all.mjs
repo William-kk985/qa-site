@@ -22,6 +22,34 @@ if (!process.env.QA_EMAIL || !process.env.QA_PASS) {
   process.exit(2);
 }
 
+/* ⚠️ 先探一次外网再开跑。
+   这台机器的出口代理是**间歇性**的：降级时所有外网（Supabase / GitHub / npm）
+   全部 ECONNRESET。那时跑出来的是 14/20 这种结果，**看起来像代码坏了**，
+   其实一个断言都没问题 —— 逐个单独重跑全过。
+   假红灯比红灯更浪费时间，所以网络不通时直接喊停，别给一份不可信的报告。 */
+{
+  const { SUPABASE_URL, SUPABASE_KEY } = await import('./lib/rest.mjs');
+  let netErr = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(SUPABASE_URL + '/rest/v1/questions?select=id&limit=1',
+        { headers: { apikey: SUPABASE_KEY } });
+      if (r.ok || r.status < 500) { netErr = null; break; }
+      netErr = new Error('HTTP ' + r.status);
+    } catch (e) {
+      netErr = e;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  if (netErr) {
+    console.error('\n❌ 连不上 Supabase（' + (netErr.cause?.code || netErr.message) + '）。');
+    console.error('   这台机器的出口代理是间歇性的，此时跑出来的红全是假的 ——');
+    console.error('   同一份代码在代理正常时是 20/20。');
+    console.error('   请确认网络恢复后再跑：curl -s -o /dev/null -w "%{http_code}" ' + SUPABASE_URL + '/rest/v1/\n');
+    process.exit(3);
+  }
+}
+
 const entries = await fs.readdir(HERE);
 const files = entries.filter(f => /^check-.*\.mjs$/.test(f) || f === 'e2e.mjs').sort();
 // e2e 最长、也最“动数据库”，放最后跑
