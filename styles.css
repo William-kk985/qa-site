@@ -18,6 +18,7 @@
   --ok-text: #05603a;
   --ok-bg: #ecfdf3;
   --ok-border: #a6f4c5;
+  --role-member: #0e7490;   /* 组员：普通用户和管理者之间的一档 */
   --role-admin: #b45309;
   --role-super: #7c3aed;
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .04);
@@ -60,6 +61,7 @@
     --ok-text: #75e0a7;
     --ok-bg: #12331f;
     --ok-border: #1d5c37;
+    --role-member: #67e8f9;
     --role-admin: #fbbf24;
     --role-super: #c4b5fd;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4);
@@ -86,6 +88,7 @@
     --ok-text: #75e0a7;
     --ok-bg: #12331f;
     --ok-border: #1d5c37;
+    --role-member: #67e8f9;
     --role-admin: #fbbf24;
     --role-super: #c4b5fd;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4);
@@ -982,6 +985,11 @@ h1, h2, h3, p { margin: 0; }
   border: 1px solid;
   line-height: 1.6;
   white-space: nowrap;
+}
+.role-member {
+  color: var(--role-member);
+  border-color: color-mix(in srgb, var(--role-member) 40%, transparent);
+  background: color-mix(in srgb, var(--role-member) 12%, transparent);
 }
 .role-admin {
   color: var(--role-admin);

@@ -575,7 +575,7 @@ alter table public.profiles add column if not exists role text not null default 
 
 alter table public.profiles drop constraint if exists profiles_role_check;
 alter table public.profiles add constraint profiles_role_check
-  check (role in ('user', 'admin', 'super_admin'));
+  check (role in ('user', 'member', 'admin', 'super_admin'));
 
 -- 查角色必须走 security definer 函数。
 -- 如果在 profiles 的权限规则里直接 select profiles，会**无限递归**（Supabase 经典坑）。
@@ -607,8 +607,9 @@ language sql
 immutable
 as $$
   select case p_role
-           when 'super_admin' then 3
-           when 'admin'       then 2
+           when 'super_admin' then 4
+           when 'admin'       then 3
+           when 'member'      then 2
            else 1
          end;
 $$;
@@ -679,7 +680,11 @@ create policy "问题：本人或管理者可删" on public.questions
     auth.uid() = author_id
     or public.my_role() = 'super_admin'
     -- 管理者只能删"级别比自己低"的人的内容 —— 所以管理者之间互不管理
-    or (public.my_role() = 'admin' and public.role_level(public.role_of(author_id)) < 2)
+    -- ⚠️ 不要写死 < 2：加了「组员」之后 2 的含义变了。
+    --    表达成"严格低于管理者自己的层级"，加层级时自动跟着走。
+    or (public.my_role() = 'admin'
+        and public.role_level(public.role_of(author_id))
+            < public.role_level('admin'))
   );
 
 -- 回答：同样的规则
@@ -690,7 +695,11 @@ create policy "回答：本人或管理者可删" on public.answers
   using (
     auth.uid() = author_id
     or public.my_role() = 'super_admin'
-    or (public.my_role() = 'admin' and public.role_level(public.role_of(author_id)) < 2)
+    -- ⚠️ 不要写死 < 2：加了「组员」之后 2 的含义变了。
+    --    表达成"严格低于管理者自己的层级"，加层级时自动跟着走。
+    or (public.my_role() = 'admin'
+        and public.role_level(public.role_of(author_id))
+            < public.role_level('admin'))
   );
 
 
@@ -833,25 +842,62 @@ stable
 as $$
   select case public.my_role()
            when 'super_admin' then auth.uid() <> p_target_user_id
-           when 'admin'       then public.role_level(public.role_of(p_target_user_id)) < 2
+           when 'admin'       then public.role_level(public.role_of(p_target_user_id))
+                                     < public.role_level('admin')
            else false
          end;
 $$;
 
--- 13.6.1 任命 / 撤销角色 —— **只有大管理者能调用**
+-- 13.6.1 任命 / 撤销角色
+--        · 大管理者：能给任何人任何角色
+--        · 管理者  ：**只能把低于自己的人设为「组员」**（授组员权）
+--                    —— 不能设管理员/大管理者（不能越级提拔），也不能降级
+--        · 其他人  ：不能调用
+--
+--        ⚠️ 「仅大管理者能移除组员、降级为普通用户」这条**不是单独写的判断**，
+--           而是从"管理者只能设 member"自然推出来的：管理者压根没有把谁设成
+--           user 的能力。少一个特判，就少一个写错的机会。
 create or replace function public.set_user_role(p_user_id uuid, p_role text)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_actor_role  text := public.my_role();
+  v_actor_level int;
 begin
   if auth.uid() is null then raise exception '请先登录'; end if;
-  if public.my_role() <> 'super_admin' then raise exception '只有大管理者能任命角色'; end if;
-  if p_role not in ('user', 'admin', 'super_admin') then raise exception '角色不合法'; end if;
-  if p_user_id = auth.uid() then raise exception '不能改自己的角色（怕把自己降级后没人管得了）'; end if;
+
+  if p_role not in ('user', 'member', 'admin', 'super_admin') then
+    raise exception '角色不合法';
+  end if;
+
+  if p_user_id = auth.uid() then
+    raise exception '不能改自己的角色（怕把自己降级后没人管得了）';
+  end if;
+
   if not exists (select 1 from public.profiles where id = p_user_id) then
     raise exception '这个人不存在';
+  end if;
+
+  v_actor_level := public.role_level(v_actor_role);
+
+  if v_actor_role = 'super_admin' then
+    -- 大管理者：随便设（自己的情况上面已经挡掉了）
+    null;
+
+  elsif v_actor_role = 'admin' then
+    -- 管理者只有一种能力：把**严格低于自己**的人设为组员
+    if p_role <> 'member' then
+      raise exception '管理者只能把成员设为「组员」；设管理员或降级只有大管理者能做';
+    end if;
+    if public.role_level(public.role_of(p_user_id)) >= v_actor_level then
+      raise exception '只能设置比你自己的层级低的人';
+    end if;
+
+  else
+    raise exception '只有管理者或大管理者能授予「组员」';
   end if;
 
   update public.profiles set role = p_role where id = p_user_id;
@@ -1079,7 +1125,10 @@ set search_path = public
 stable
 as $$
 begin
-  if public.role_level(public.my_role()) < 2 then
+  -- ⚠️ 这里是"至少管理者"的闸门。原来写 < 2；加了「组员」之后 2 变成组员，
+  --    不改的话*组员*会被放进来 —— 本次改动最危险的一处。
+  --    改成和 admin 的层级比，不写死数字。
+  if public.role_level(public.my_role()) < public.role_level('admin') then
     raise exception '只有管理者能看统计';
   end if;
 

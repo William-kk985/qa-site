@@ -49,12 +49,18 @@ function userChip(user, ts, size = '') {
 }
 
 /* ------------------------------ 角色 ------------------------------
-   三级：普通用户 user < 管理者 admin < 大管理者 super_admin
+   四级：普通用户 user < 组员 member < 管理者 admin < 大管理者 super_admin
    ⚠️ 前端的判断只是"决定按钮显不显示"，真正的拦截在数据库的函数里。
       改前端代码是绕不过权限的。
+   ⚠️ 阈值一律写成"和某个角色比"，不要写死数字 —— 之前 role_level 的数字被
+      当成阈值散在好几处，加「组员」这一层时差点让组员拿到管理者权限。
    ------------------------------------------------------------------ */
-const ROLE_LABEL = { user: '普通用户', admin: '管理者', super_admin: '大管理者' };
-const ROLE_LEVEL = { user: 1, admin: 2, super_admin: 3 };
+const ROLE_LABEL = {
+  user: '普通用户', member: '组员', admin: '管理者', super_admin: '大管理者',
+};
+const ROLE_LEVEL = { user: 1, member: 2, admin: 3, super_admin: 4 };
+/** 「至少是管理者」的层级。别写死数字，加层级时只改 ROLE_LEVEL 一处。 */
+const ADMIN_LEVEL = ROLE_LEVEL.admin;
 
 const levelOf = u => ROLE_LEVEL[(u && u.role) || 'user'] || 1;
 const myLevel = () => ROLE_LEVEL[(me && me.role) || 'user'] || 1;
@@ -64,12 +70,13 @@ const roleBadge = u => {
   return r === 'user' ? '' : `<span class="role-badge role-${r}">${ROLE_LABEL[r]}</span>`;
 };
 
-/* 我能不能管这个人：大管理者管所有人；管理者只能管级别比自己低的（所以管理者之间互不管理） */
+/* 我能不能管这个人：大管理者管所有人；其余人只能管**级别严格比自己低**的
+   （所以管理者之间互不管理，管理者也管不了大管理者）
+   —— 用相对比较而不是写死的数字，加层级时自动跟着走。 */
 function canManage(u) {
   if (!me || !u || !u.id || u.id === me.id) return false;
-  if (myLevel() === 3) return true;
-  if (myLevel() === 2) return levelOf(u) < 2;
-  return false;
+  if (me.role === 'super_admin') return true;
+  return levelOf(u) < myLevel();
 }
 
 let toastTimer = null;
@@ -1248,7 +1255,7 @@ async function openProfile() {
 
   // 「成员」只有管理者以上看得到
   const mb = $('#members-btn');
-  if (mb) mb.classList.toggle('hidden', myLevel() < 2);
+  if (mb) mb.classList.toggle('hidden', myLevel() < ADMIN_LEVEL);
 
   $('#profile-form [name=real_name]').value = me.realName || '';
   $('#profile-form [name=comp_years]').value =
@@ -1363,7 +1370,7 @@ function closeNotices() { $('#notice-mask').classList.add('hidden'); }
 
 /* ------------------------------ 成员列表（管理者以上） ------------------------------ */
 async function openMembers() {
-  if (myLevel() < 2) { toast('只有管理者能看成员列表'); return; }
+  if (myLevel() < ADMIN_LEVEL) { toast('只有管理者能看成员列表'); return; }
 
   closeProfile();
   $('#members-count').textContent = '';
@@ -1412,9 +1419,11 @@ function closeEdit() {
 }
 
 function renderMembers() {
-  const canEditRoles = myLevel() === 3;
+  /* 「提醒未补全资料的人」和「踢出」都只有大管理者能做 —— 层级分明，
+     不是大管理者就看不到这些按钮。 */
+  const isSuper = !!me && me.role === 'super_admin';
   const rb = $('#remind-incomplete');
-  if (rb) rb.classList.toggle('hidden', !canEditRoles);
+  if (rb) rb.classList.toggle('hidden', !isSuper);
 
   const nameOf = m => String(m.real_name || m.display_name || '');
 
@@ -1452,18 +1461,31 @@ function renderMembers() {
       ? `${esc(m.real_name)} <span class="faint">（${esc(m.display_name)}）</span>`
       : `${esc(m.display_name)} <span class="faint">（真名未填）</span>`;
 
-    const btns = canEditRoles
-      ? ['user', 'admin', 'super_admin'].map(r => `
+    /* 各层级能看到/能做到的不一样，这里必须**按能力渲染**，不能只按"是不是管理者"：
+         · 大管理者：四个角色都能设 + 踢出
+         · 管理者  ：**只能设「组员」**（授组员权）；不能设管理员（不能越级提拔），
+                     也不能降级（"仅大管理者能移除组员"就是这么落地的）
+         · 其余    ：看不到成员面板
+       按钮和数据库里的 set_user_role 是同一套规则，前端只是提前把做不到的灰掉。 */
+    const myLvl = myLevel();
+    const assignable = isSuper ? ['user', 'member', 'admin', 'super_admin']
+                               : (myLvl >= ADMIN_LEVEL ? ['member'] : []);
+    const canTouch = t => isSuper || (ROLE_LEVEL[t.role] || 1) < myLvl;
+
+    const btns = assignable.length
+      ? assignable.map(r => `
           <button class="btn btn-ghost btn-sm ${m.role === r ? 'is-current' : ''}"
                   data-action="set-role" data-u="${m.user_id}" data-role="${r}"
-                  data-name="${esc(m.display_name)}" ${isSelf ? 'disabled' : ''}>
+                  data-name="${esc(m.display_name)}" ${(isSelf || !canTouch(m)) ? 'disabled' : ''}
+                  title="${isSelf ? '不能改自己的角色'
+                    : (!canTouch(m) ? '只能操作层级比你低的人' : '')}">
             ${ROLE_LABEL[r]}
           </button>`).join('')
-        + (isSelf ? '' : `
+        + (isSuper && !isSelf ? `
           <button class="btn btn-danger btn-sm" data-action="kick" data-u="${m.user_id}"
                   data-name="${esc(m.display_name)}"
                   data-q="${m.questions_total === undefined ? 0 : m.questions_total}"
-                  data-a="${m.answers_total === undefined ? 0 : m.answers_total}">踢出</button>`)
+                  data-a="${m.answers_total === undefined ? 0 : m.answers_total}">踢出</button>` : '')
       : '';
 
     return `<div class="member-row">
