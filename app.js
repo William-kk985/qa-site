@@ -2142,6 +2142,9 @@ async function uploadAvatar(file) {
 const MEDIA_BUCKET = 'media';
 const MEDIA_IMG_MAX_SIDE = 1600;                  // 图片最长边压到这么宽/高
 const MEDIA_IMG_MAX_BYTES = 5 * 1024 * 1024;      // 压缩**之后**还超过 5MB 就拒（原图多大不管）
+/* ⚠️ 上限值和数据库里那份**必须一致**（schema.sql 第 22.4 节的 check_attachment_limit：
+   图片 4 张 + 视频链接 1 个）。前端这道只是"提前告诉你"，真正拦得住的是数据库 ——
+   拿 publishable key 直接打 REST 就能绕过这里，所以那边也有一份。改一处要改两处。 */
 const MEDIA_MAX_COUNT = 4;                        // 一条内容最多几张图
 const MEDIA_IMG_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 

@@ -40,6 +40,7 @@ const stamp = Date.now();
 
 let uA = null, uB = null, tokAdmin = null;
 let qid = null;
+const capQids = [];           // 测数量上限时造的问题，收尾删掉
 const uploaded = [];          // 传上去的 Storage 路径，最后尽力删
 
 /** 原样把字节 POST 到 Storage（rest.mjs 的 call 会 JSON 序列化，二进制走不了）。 */
@@ -200,13 +201,63 @@ try {
     check(`★★ 视频链接只收 http/https：${bad.slice(0, 24)}… 写不进库（check 约束）`,
       r.status >= 400, `HTTP ${r.status} ${msg(r.data)}`);
   }
+  /* ---------- 2.6 ★★ 数量上限：4 张图 + 1 个视频链接（数据库里也拦） ----------
+     前端当然会拦（选到第 5 张就提示），但"前端不是权限"：拿 key 直接打 REST
+     可以一次塞 500 行。所以数据库里也有一份（schema.sql 第 22.4 节的触发器）。 */
   {
-    const r = await addAttachment(uA.token, {
-      owner_id: uA.id, question_id: qid, kind: 'video',
-      url: 'http://example.com/ok.mp4', mime: '', bytes: 0, position: 9,
+    const capQ = await call('POST', '/rest/v1/questions', {
+      token: uB.token,
+      body: { author_id: uB.id, title: `【附件上限】${stamp} 乙的问题`, body: '测上限。', tags: [] },
     });
-    check('★ 反面对照：普通 http/https 链接写得进去（约束没有把正常链接一起挡掉）',
-      r.status < 400, `HTTP ${r.status} ${msg(r.data)}`);
+    const capQid = Array.isArray(capQ.data) && capQ.data[0] ? capQ.data[0].id : null;
+    capQids.push(capQid);
+    check('造一条干净的问题用来测数量上限', !!capQid);
+
+    const row = (kind, pos, url) => ({
+      owner_id: uB.id, question_id: capQid, kind, url: url || (PUBLIC_PREFIX + imgPath),
+      mime: kind === 'image' ? 'image/png' : '', bytes: 1, position: pos,
+    });
+
+    {
+      /* 这一条同时是"视频链接约束"的正面对照：普通 http/https 链接写得进去，
+         说明上面那几条被拒是因为伪协议，不是约束把正常链接一起挡了。 */
+      const r = await call('POST', '/rest/v1/attachments',
+        { token: uB.token, body: [row('video', 0, 'https://example.com/1.mp4')] });
+      check('★ 正面对照：普通 http/https 的视频链接能挂上（约束没误伤）',
+        r.status < 400, `HTTP ${r.status} ${msg(r.data)}`);
+    }
+    {
+      const r = await call('POST', '/rest/v1/attachments',
+        { token: uB.token, body: [row('video', 1, 'https://example.com/2.mp4')] });
+      check('★★ 同一个内容下第 2 个视频链接被数据库拒掉',
+        r.status >= 400, `HTTP ${r.status} ${msg(r.data)}`);
+    }
+    {
+      /* 一口气插 5 张 —— 前端不可能这么发，但直接打 REST 就能。
+         这条专门盯"语句级触发器看得见同一条语句里新插的行"：
+         只按表里已有的算（0 张）会漏掉，正是这个用例能区分出来的。 */
+      const r = await call('POST', '/rest/v1/attachments',
+        { token: uB.token, body: [0, 1, 2, 3, 4].map(i => row('image', i)) });
+      check('★★ 一条语句里塞 5 张图会被整条拒掉（不是只拦第 5 次请求）',
+        r.status >= 400, `HTTP ${r.status} ${msg(r.data)}`);
+      const left = await call('GET',
+        `/rest/v1/attachments?select=id&question_id=eq.${capQid}&kind=eq.image`, { token: uB.token });
+      check('被拒之后一张也没落库（整条语句回滚）',
+        Array.isArray(left.data) && left.data.length === 0,
+        `还剩 ${Array.isArray(left.data) ? left.data.length : '?'} 张`);
+    }
+    {
+      const r = await call('POST', '/rest/v1/attachments',
+        { token: uB.token, body: [0, 1, 2, 3].map(i => row('image', i)) });
+      check('★ 对照组：正好 4 张能过（上限没有误伤正常用法）',
+        r.status < 400, `HTTP ${r.status} ${msg(r.data)}`);
+    }
+    {
+      const r = await call('POST', '/rest/v1/attachments',
+        { token: uB.token, body: [row('image', 4)] });
+      check('★★ 已经 4 张时再挂第 5 张被拒',
+        r.status >= 400, `HTTP ${r.status} ${msg(r.data)}`);
+    }
   }
 
   /* ---------- 3. 读 / 改 / 删的边界 ---------- */
@@ -533,6 +584,16 @@ try {
   {
     const r = await call('DELETE', `/rest/v1/questions?id=eq.${qidB}`, { token: uB.token, prefer: false });
     check('乙那条测试问题也清掉了', r.status < 400, `HTTP ${r.status} ${msg(r.data)}`);
+  }
+  {
+    for (const id of capQids.filter(Boolean)) {
+      await call('DELETE', `/rest/v1/questions?id=eq.${id}`, { token: uB.token, prefer: false });
+    }
+    const r = await call('GET',
+      `/rest/v1/attachments?select=id&question_id=in.(${capQids.filter(Boolean).join(',') || 'null'})`,
+      { token: tokAdmin });
+    check('测上限用的那条问题也清掉了（附件跟着级联）',
+      Array.isArray(r.data) && r.data.length === 0);
   }
 } finally {
   /* 收尾：删掉测试期间传上去的图片。

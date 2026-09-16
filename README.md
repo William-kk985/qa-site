@@ -1082,8 +1082,8 @@ create trigger on_answer_one_level
 | 限制 | 值 | 在哪拦 |
 |---|---|---|
 | 图片 | PNG / JPG / WebP / GIF，**压到最长边 1600px** 后 ≤ 5MB | 客户端压缩 + 桶的 `allowed_mime_types` / `file_size_limit` |
-| 图片张数 | 每条内容最多 4 张 | 客户端（数据库不管条数） |
-| 视频 | **只收链接**（http/https），发布后显示成一个外链卡片 | 前端 `parseVideoLink()` + 数据库的 check 约束 |
+| 图片张数 | 每条内容最多 4 张 | 客户端**和**数据库（`check_attachment_limit()` 触发器） |
+| 视频链接 | **只收链接**（http/https），每条最多 1 个，发布后显示成一个外链卡片 | 前端 `parseVideoLink()` + 数据库的 check 约束 + 数量触发器 |
 
 ### ⚠️ 为什么视频是链接，不是上传
 
@@ -1115,6 +1115,7 @@ create trigger on_answer_one_level
 | 两种 kind 的存法 | `image` → media 桶里的**文件**；`video` → **外部链接** | 一眼能看出这条是"我们的文件"还是"别人家的地址" |
 | 挂在谁身上 | `question_id` 和 `answer_id` **二选一**（`check ((question_id is null) <> (answer_id is null))`） | 既不悬空，也不会同时属于问题和回答 |
 | 视频链接约束 | `check (kind <> 'video' or url ~* '^https?://[^[:space:]]+$')` | 防 XSS 的最后一道：`javascript:` / `data:` 在数据库层就写不进来 |
+| **数量上限** | 一条内容最多 **4 张图 + 1 个视频链接**（语句级 `after insert` 触发器 + 过渡表） | "前端不是权限"：不拦的话，拿 key 直接打 REST 能一次塞 500 行，把页面撑爆还顺手占掉额度。用语句级触发器是因为前端就是"一口气 insert 4 张"的，判定必须看得见**同一条语句里刚插入的行** |
 | `storage.buckets` | `media`，**public**，只收图片，限 5MB | 问题和回答本来就是公开的，图片跟着走；只收图片是为了守住那 1GB |
 | 上传路径 | `<user_id>/<随机 id>.<扩展名>` —— **必须以自己的 user_id 开头** | Storage 的 RLS 靠第一段表达"只有本人能往自己目录写"；用随机 id 而不是问题 id，是因为上传发生在建帖**之前** |
 | 读 | **所有人**（含未登录访客） | 和问题 / 回答一样的公开性 |

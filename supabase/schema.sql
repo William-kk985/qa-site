@@ -2445,7 +2445,54 @@ grant select on public.attachments to anon, authenticated;
 grant insert, delete on public.attachments to authenticated;
 
 -- ---------------------------------------------------------------------------
--- 22.4 附件自己的自检
+-- 22.4 数量上限：一条内容最多 4 张图 + 1 个视频链接
+--
+--      ⚠️ 这个限制**必须在数据库里也有一份**。前端当然会先拦（选到第 5 张会提示），
+--         但"前端不是权限"是这个项目一贯的规矩：拿 publishable key 直接打 REST
+--         就能一次塞 500 行进来，把那条问题页面撑爆、顺手把 1GB 额度占掉。
+--
+--      ⚠️ 为什么是**语句级 after 触发器 + 过渡表**（`referencing new table as new_rows`）：
+--         前端是"最多 4 张图 + 1 个链接**一口气 insert**"的，判定必须能看见
+--         **同一条语句里刚插入的全部行**。语句收尾时才触发的 after 触发器正好能看见
+--         （行级 before 触发器就不行：那条语句的改动对它自己还不可见，5 行一起插
+--          会一行都拦不住）。过渡表只是用来**限定检查范围**（只看这次涉及的父行），
+--         不然每插一行都要把整张表 group by 一遍。
+--
+--      上限值和前端保持一致（app.js 的 MEDIA_MAX_COUNT / 视频那个输入框只有一个）：
+--         图片 4 张、视频链接 1 个。
+-- ---------------------------------------------------------------------------
+create or replace function public.check_attachment_limit()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_msg text;
+begin
+  select case when a.kind = 'video' then '一条内容最多 1 个视频链接'
+                                     else '一条内容最多 4 张图片' end
+    into v_msg
+    from public.attachments a
+   where coalesce(a.question_id, a.answer_id) in
+         (select coalesce(question_id, answer_id) from new_rows)
+   group by a.question_id, a.answer_id, a.kind
+  having count(*) > case when a.kind = 'video' then 1 else 4 end
+   limit 1;
+
+  if v_msg is not null then raise exception '%', v_msg; end if;
+  return null;
+end;
+$$;
+
+drop trigger if exists attachments_limit on public.attachments;
+create trigger attachments_limit
+  after insert on public.attachments
+  referencing new table as new_rows
+  for each statement execute function public.check_attachment_limit();
+
+-- ---------------------------------------------------------------------------
+-- 22.5 附件自己的自检
 --      也把第 20.4 / 21.4 那张统计再报一遍（SQL Editor 只显示最后一张表）
 -- ---------------------------------------------------------------------------
 select
