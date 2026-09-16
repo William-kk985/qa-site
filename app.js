@@ -1743,8 +1743,10 @@ async function applySession(session) {
   }
   const u = session.user;
   const md = u.user_metadata || {};
+  /* ⚠️ 兜底昵称和数据库那边保持一致：**不用邮箱 @ 前面那段**（QQ 邮箱前缀 = QQ 号，
+     而昵称是公开可搜的），用 id 前 4 位。正常情况下下面 my_profile() 会覆盖掉它。 */
   let name = md.display_name || md.user_name || md.preferred_username || md.full_name || md.name
-    || (u.email || '').split('@')[0] || '匿名用户';
+    || ('同学' + String(u.id || '').slice(0, 4));
   /* role 来自数据库函数 my_profile()，只可能是四个角色之一；
      标上 Role 是为了让下面 `role = row.role` 和 me.role 对得上。 */
   /** @type {Role} */
@@ -4280,7 +4282,10 @@ document.addEventListener('submit', async e => {
           password,
           options: {
             data: {
-              display_name: displayName || email.split('@')[0],
+              /* ⚠️ 昵称留空时**绝不能**拿邮箱 @ 前面那段兜底：QQ 邮箱的前缀就是 QQ 号，
+                 而昵称是全站公开、还能被搜到的 —— 那等于把"邮箱不暴露"换个地方泄出去。
+                 传 null 让数据库那边生成一个和身份无关的兜底昵称（'同学' + id 前 4 位）。 */
+              display_name: displayName || null,
               real_name: realName,
             },
           },

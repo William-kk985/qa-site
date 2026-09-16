@@ -71,7 +71,10 @@ begin
       nullif(trim(new.raw_user_meta_data ->> 'preferred_username'), ''),
       nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
       nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
-      split_part(coalesce(new.email, 'user'), '@', 1)
+      -- ⚠️ 兜底昵称**绝不能**取邮箱 @ 前面那段：QQ 邮箱的前缀就是 QQ 号，
+      --    而昵称是全站公开、还能被名字搜到的 —— 那等于把"邮箱不暴露"换个地方泄出去。
+      --    改用 id 前 4 位：和身份无关、也允许重名（重名本来就没禁止）。
+      '同学' || substr(new.id::text, 1, 4)
     )
   )
   on conflict (id) do nothing;
@@ -184,11 +187,15 @@ create policy "回答：登录后才能发" on public.answers
   for insert to authenticated
   with check (auth.uid() = author_id);
 
+-- ⚠️ 回答**故意没有**"作者可以随便改自己那一行"的规则 —— 和问题表一样（见第 13.7 节）。
+--    留着的后果不是"改别人"，而是作者能直接 PATCH /rest/v1/answers 改这几列：
+--      · created_at → 把旧回答伪造成"本周回答"，污染成员目录的周统计
+--      · edited_at  → 抹掉「已编辑」标记，绕过 update_answer() 里的盖章
+--      · question_id→ 把回答挪到别的问题下面
+--    编辑回答只能走 update_answer()（security definer，校验作者并盖 edited_at）。
+--    所以这里**只 drop、不 create**；grant 那边也不给它 update（见第 9 节），
+--    这样"编辑走函数"是数据库层面的规则，不是前端自觉。
 drop policy if exists "回答：只能改自己的" on public.answers;
-create policy "回答：只能改自己的" on public.answers
-  for update to authenticated
-  using (auth.uid() = author_id)
-  with check (auth.uid() = author_id);
 
 drop policy if exists "回答：只能删自己的" on public.answers;
 create policy "回答：只能删自己的" on public.answers
@@ -436,9 +443,16 @@ grant select on public.profiles, public.questions, public.answers,
 -- 收藏只授权给登录用户：未登录的人连读的权限都没有（RLS 还会再按行过滤一次）
 grant select, insert, delete on public.bookmarks to authenticated;
 
-grant insert, update, delete on public.questions, public.answers,
+grant insert, update, delete on public.questions,
                                public.question_votes, public.answer_votes
   to authenticated;
+
+-- ⚠️ **`answers` 故意不在这条 grant 里**：编辑回答必须走 update_answer()
+--    （第 2 节把"作者可改自己那一行"的 policy 也撤了，两边保持一致）。
+--    授权是这里最后说了算的，所以别把 answers 加回上面那条。
+--    仍然要一句 revoke：**已经升级过的老库**上面还留着旧的 update 授权。
+grant insert, delete on public.answers to authenticated;
+revoke update on public.answers from anon, authenticated;
 
 grant update on public.profiles to authenticated;
 
@@ -454,7 +468,8 @@ grant execute on function public.increment_views(uuid)       to anon, authentica
 --
 --     ⚠️ 重要：通知**只能由下面的触发器生成**，任何人（包括登录用户）都不允许
 --     直接往这张表里插数据 —— 否则坏分子可以伪造一条"某某回答了你的问题"，
---     点进去就是钓鱼链接。所以第 10.4 节里故意**没有** grant insert。
+--     点进去就是钓鱼链接。两道锁一起上：没有 insert policy（RLS 拒），
+--     第 10.4 节还显式 revoke 掉了 insert 授权（Supabase 的默认授权会给）。
 -- ============================================================================
 
 -- 10.1 表
@@ -593,6 +608,15 @@ create trigger on_answer_accepted
   for each row execute function public.notify_on_accept();
 
 -- 10.4 授权
+--     ⚠️ **故意没有 insert** —— 通知只能由上面的触发器写（触发器是 security definer，
+--        不受这里的 grant 影响），这样坏分子就没法伪造一条"某某回答了你的问题"来钓鱼。
+--
+--     ⚠️ 光"没写 grant"是不够的：Supabase 对 public 里的新表有**默认授权**
+--        （anon / authenticated 会拿到增删改查一整套，第 21 节的 messages 就踩过这个），
+--        所以这里显式 revoke 一次，别把安全建立在"我没写那句 grant"上。
+--        就算哪天有人在上面加了 insert policy，这一句也能继续挡住。
+--        （第 21 节 messages 用的是同样的写法。）
+revoke insert on public.notifications from anon, authenticated;
 grant select, update, delete on public.notifications to authenticated;
 -- ↑ 故意没有 insert：通知只能由触发器写入
 
@@ -620,9 +644,11 @@ grant select on public.notifications_view to authenticated;
 -- ============================================================================
 -- 11. 补历史用户
 --    如果有人在触发器建好之前就注册了，这里给他们补上 profiles 行。
+--    ⚠️ 兜底昵称和 handle_new_user 一样：**不用邮箱前缀**（QQ 邮箱前缀 = QQ 号，
+--       而昵称是公开且可搜的），用 id 前 4 位。
 -- ============================================================================
 insert into public.profiles (id, display_name)
-select u.id, split_part(coalesce(u.email, 'user'), '@', 1)
+select u.id, '同学' || substr(u.id::text, 1, 4)
   from auth.users u
   left join public.profiles p on p.id = u.id
  where p.id is null
@@ -747,7 +773,11 @@ begin
   select author_id into v_author from public.questions where id = p_question_id;
   if v_author is null then raise exception '问题不存在'; end if;
 
-  -- 提问者本人，或者大管理者
+  -- 提问者本人，或**大管理者兜底**：有人问完就跑了、问题烂在那儿没人能标「已解决」。
+  -- ⚠️ 这是**有意的例外**，不是漏配：前端只在"本人看自己的问题"时才画那个切换按钮，
+  --    大管理者想走这条路只能拿 key 直接打接口 —— 也就是"前台比后台严"，
+  --    方向是安全的，但**文档必须写清楚**，否则"只有提问者能标"这句话就是假的。
+  --    README 的权限表里为它单独留了一行。
   if v_author <> auth.uid() and public.my_role() <> 'super_admin' then
     raise exception '只有提问者本人能改这个状态';
   end if;
@@ -1065,6 +1095,12 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- 13.7 浏览量 +1 顺便记浏览历史（未登录访客只加浏览量，不记历史）
+--
+--      ⚠️ 浏览记录**只保留最近 30 天**（第 8 节和 README 都是这么说的），
+--         所以每次记新的一条时，顺手把这个用户 30 天前的删掉。
+--         以前只在 app.js 读取时过滤（`gte('viewed_at', since)`），库里其实
+--         永久保留 —— "数据最小化"的承诺就成了空话，所以清理放在**写入端**：
+--         这里是浏览记录唯一的正常写入口，删一条走 (user_id, viewed_at) 索引，很便宜。
 -- ---------------------------------------------------------------------------
 drop function if exists public.increment_views(uuid);
 create or replace function public.increment_views(p_question_id uuid)
@@ -1080,6 +1116,11 @@ begin
     insert into public.view_history (user_id, question_id, viewed_at)
     values (auth.uid(), p_question_id, now())
     on conflict (user_id, question_id) do update set viewed_at = now();
+
+    -- 只保留最近 30 天（见本节开头）
+    delete from public.view_history
+     where user_id = auth.uid()
+       and viewed_at < now() - interval '30 days';
   end if;
 end;
 $$;
@@ -1160,12 +1201,50 @@ alter table public.profiles add constraint profiles_comp_years_check
 
 
 -- ---------------------------------------------------------------------------
+-- 14.1.0 时间口径：和「今天 / 本周 / 今年」有关的一律按**北京时间**
+--
+--      背景：Supabase 的数据库会话时区是 **UTC**，而这是给国内同学用的站。
+--      直接写 now() / date_trunc(...) / extract(year from ...) 都按 UTC 算，
+--      于是每天 / 每周 / 每年的"翻篇"都发生在**北京时间早上 8 点**。踩过的坑：
+--        · 「本周」= 北京时间周一 08:00 才翻篇 → 北京时间周一凌晨 0～8 点
+--          提的问题、写的回答会被算进上一周（界面却写着"本周从周一算起"）
+--        · 参赛年数跨年 +1 也晚 8 小时（1 月 1 日 00:00～08:00 还不涨）
+--
+--      所以这两个口径都抽成函数，**不要在调用点各写一份** ——
+--      口径一散开，成员目录和别处的数字迟早对不上（和 comp_years_effective 同理）。
+--
+--      ⚠️ 换算三步缺一不可：
+--        now() at time zone 'Asia/Shanghai' → 北京墙上时间（timestamp，无时区）
+--        date_trunc / extract(…)            → 在那个口径上算（周一 = ISO 周首日）
+--        … at time zone 'Asia/Shanghai'     → 换算回 timestamptz，才能和 created_at 比
+-- ---------------------------------------------------------------------------
+create or replace function public.beijing_year()
+returns int
+language sql
+stable
+set search_path = public
+as $$
+  select extract(year from now() at time zone 'Asia/Shanghai')::int;
+$$;
+
+-- 本周的起点 = 北京时间周一 00:00（weekly_stats 的两处统计用它）
+create or replace function public.week_start()
+returns timestamptz
+language sql
+stable
+set search_path = public
+as $$
+  select date_trunc('week', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai';
+$$;
+
+
+-- ---------------------------------------------------------------------------
 -- 14.1.1 迁移：给已有数据补上「记录年份」
 --        ⚠️ 必须是幂等的：只补 comp_years_set_year 还是 null 的行。
 --           补上之后有效值 = 原值（今天看起来一模一样），明年才会自动 +1。
 -- ---------------------------------------------------------------------------
 update public.profiles
-   set comp_years_set_year = extract(year from now())::int
+   set comp_years_set_year = public.beijing_year()
  where comp_years is not null and comp_years_set_year is null;
 
 
@@ -1179,6 +1258,8 @@ update public.profiles
 --        边界：
 --          · 基准值为 null（没填）→ 返回 null，**不能算成 0**（"未填"和"0 年"是两回事）
 --          · 记录年份为 null（理论上有基准值就该有年份）→ 回退成基准值，别崩
+--        ⚠️ "当前年份"走 public.beijing_year()（见 14.1.0）：
+--           直接 extract(year from now()) 是 UTC 年，跨年那天会晚 8 小时才 +1。
 -- ---------------------------------------------------------------------------
 create or replace function public.comp_years_effective(p_comp_years int, p_set_year int)
 returns int
@@ -1189,7 +1270,7 @@ as $$
   select case
            when p_comp_years is null then null
            when p_set_year    is null then p_comp_years
-           else p_comp_years + (extract(year from now())::int - p_set_year)
+           else p_comp_years + (public.beijing_year() - p_set_year)
          end;
 $$;
 
@@ -1236,7 +1317,10 @@ begin
       nullif(trim(new.raw_user_meta_data ->> 'preferred_username'), ''),
       nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
       nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
-      split_part(coalesce(new.email, 'user'), '@', 1)
+      -- ⚠️ 兜底昵称**绝不能**取邮箱 @ 前面那段：QQ 邮箱的前缀就是 QQ 号，
+      --    而昵称是全站公开、还能被名字搜到的 —— 那等于把"邮箱不暴露"换个地方泄出去。
+      --    改用 id 前 4 位：和身份无关、也允许重名（重名本来就没禁止）。
+      '同学' || substr(new.id::text, 1, 4)
     ),
     nullif(trim(new.raw_user_meta_data ->> 'real_name'), '')
   )
@@ -1303,7 +1387,9 @@ as $$
 declare
   v_name text := trim(coalesce(p_display_name, ''));
   v_real text := nullif(trim(coalesce(p_real_name, '')), '');
-  v_year int  := extract(year from now())::int;
+  -- ⚠️ 盖章用的是**北京时间的年份**，必须和 comp_years_effective() 同一个口径
+  --    （见 14.1.0），否则跨年那 8 小时会记错年份、把自动 +1 吃掉。
+  v_year int  := public.beijing_year();
 begin
   if auth.uid() is null then raise exception '请先登录'; end if;
 
@@ -1384,9 +1470,11 @@ begin
       p.role,
       -- 有效值（算上跨年增长）—— 和 my_profile 共用同一个公式，不会两处对不上
       public.comp_years_effective(p.comp_years, p.comp_years_set_year),
+      -- ⚠️ 本周起点走 public.week_start()（**北京时间**周一 00:00，见 14.1.0）——
+      --    直接写 date_trunc('week', now()) 会被 UTC 拖到北京时间的周一早上八点。
       (select count(*) from public.questions q
         where q.author_id = p.id
-          and q.created_at >= date_trunc('week', now()))::int,
+          and q.created_at >= public.week_start())::int,
       -- ⚠️ 回答统计**只数顶层回答**：回复不算是"又一个回答"，
       --    否则成员目录的"本周回答 / 累计回答"会和问题卡片上的回答数对不上。
       --    （回复是聊天性质的互动，不是一份独立回答 —— 这条口径要和
@@ -1394,7 +1482,7 @@ begin
       (select count(*) from public.answers a
         where a.author_id = p.id
           and a.parent_id is null
-          and a.created_at >= date_trunc('week', now()))::int,
+          and a.created_at >= public.week_start())::int,
       (select count(*) from public.questions q where q.author_id = p.id)::int,
       (select count(*) from public.answers   a
         where a.author_id = p.id and a.parent_id is null)::int,
@@ -1470,6 +1558,10 @@ grant execute on function public.weekly_stats()          to authenticated;
 grant execute on function public.remind_incomplete(text) to authenticated;
 -- 纯计算公式，没有数据；显式授权只是为了不依赖"函数默认对 PUBLIC 开放"这个隐含行为
 grant execute on function public.comp_years_effective(int, int) to authenticated;
+-- 本周起点（北京时间周一 00:00）。纯计算、无数据，放开只是不依赖"默认对 PUBLIC 开放"
+grant execute on function public.week_start() to authenticated;
+-- 北京时间的当前年份。同上
+grant execute on function public.beijing_year() to authenticated;
 
 
 -- ---------------------------------------------------------------------------
@@ -1486,7 +1578,7 @@ from public.profiles;
 -- 15. 成员统计的排序维度（**说明，没有 SQL**）
 --
 --     weekly_stats() 已经定义在第 14.5 节，它同时返回：
---       · questions_this_week / answers_this_week  —— 本周（周一起算）
+--       · questions_this_week / answers_this_week  —— 本周（**北京时间**周一起算，见 14.1.0）
 --       · questions_total    / answers_total       —— 累计
 --     所以前端可以按「参赛年份 / 提问数 / 回答数 / 本周活跃」排序查看所有人。
 --
@@ -1584,8 +1676,15 @@ grant execute on function public.set_question_tags(uuid, text[]) to authenticate
 --   看成员的真实姓名 real_name      |   ❌    |  ✅  |   ✅   |   ✅
 --   看任何人的邮箱                  |   ❌    |  ❌  |   ❌   |   ❌
 --   看别人的私信                    |   ❌    |  ❌  |   ❌   |   ❌ ← 见第 21 节
---   任命 / 撤销角色                |   ❌    |  ❌  |   ❌   |   ✅
+--   授「组员」                      |   ❌    |  ❌  |   ✅   |   ✅
+--   设管理员 / 降级 / 踢出           |   ❌    |  ❌  |   ❌   |   ✅
 --   群发"补全资料"提醒              |   ❌    |  ❌  |   ❌   |   ✅
+--
+--   ⚠️ 「授组员」和「设管理员/降级/踢出」**必须分成两行**：管理者确实能改角色，
+--      但只能往「组员」这一个方向改（见 13.6.1 的 set_user_role）。
+--      以前这里只写了一行「任命 / 撤销角色 = ❌❌❌✅」，界面上的说明也跟着写成
+--      "改角色的按钮只有大管理者能点" —— 那句话是错的，会让人以为管理者看不到按钮。
+--      这个能力是当初明确要的：「组员由大管理者 / 管理者给予，仅大管理者能移除组员」。
 --
 --   * 「组员」没有额外的管理权限，唯一比普通用户多的就是「能看到真名」和身份徽章 ——
 --     这是刻意的：真名给到"自己人"这一档。

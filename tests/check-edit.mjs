@@ -109,6 +109,48 @@ try {
   });
   check('标题太短会被拒', r.status >= 400, `HTTP ${r.status} ${msg(r.data)}`);
 
+  /* ---------- 2.5 ★ 不能绕过函数直接改表 ----------
+     编辑必须走 update_question / update_answer（它们会校验作者并盖 edited_at）。
+     直接 PATCH 表以前是开着的：答案作者能改 created_at（伪造"本周回答"、污染成员
+     目录的周统计）、抹掉 edited_at、甚至把回答挪到别的问题下面；问题作者能改 views。
+     ⚠️ 这里断言的是**值有没有变**，不是 HTTP 状态码：
+        RLS 挡下来的 UPDATE 在 PostgREST 里是 204 + 影响 0 行（不是 4xx），
+        只看状态码会得到一条永远绿的假断言。所以先读原值、PATCH、再读回来比。
+     同时留一个**正面对照**（改走函数仍然能改）——否则"改不动"也可能只是接口整个坏了。 */
+  const answerRow = async () =>
+    ((await call('GET', `/rest/v1/answers?select=id,body,created_at&id=eq.${aid}`, { token: b.token })).data || [])[0];
+  const questionRow = async () =>
+    ((await call('GET', `/rest/v1/questions?select=id,views&id=eq.${qid}`, { token: a.token })).data || [])[0];
+
+  const beforeA = await answerRow();
+  await call('PATCH', `/rest/v1/answers?id=eq.${aid}`,
+    { token: b.token, prefer: false, body: { body: '绕过函数直改的回答' } });
+  await call('PATCH', `/rest/v1/answers?id=eq.${aid}`,
+    { token: b.token, prefer: false, body: { created_at: '2000-01-01T00:00:00Z' } });
+  const afterA = await answerRow();
+  check('★★ 回答作者直接 PATCH answers 改不动正文（编辑只能走 update_answer）',
+    !!afterA && !!beforeA && afterA.body === beforeA.body,
+    `${beforeA && beforeA.body} → ${afterA && afterA.body}`);
+  check('★★ 也改不动 created_at（否则能伪造"本周回答"、污染成员目录的周统计）',
+    !!afterA && !!beforeA && afterA.created_at === beforeA.created_at,
+    `${beforeA && beforeA.created_at} → ${afterA && afterA.created_at}`);
+
+  const beforeQ = await questionRow();
+  await call('PATCH', `/rest/v1/questions?id=eq.${qid}`,
+    { token: a.token, prefer: false, body: { views: 99999 } });
+  const afterQ = await questionRow();
+  check('★ 问题作者直接 PATCH 自己的行也改不动（否则能把浏览量改成 99999）',
+    !!afterQ && !!beforeQ && afterQ.views === beforeQ.views,
+    `views ${beforeQ && beforeQ.views} → ${afterQ && afterQ.views}`);
+
+  r = await call('POST', '/rest/v1/rpc/update_answer', {
+    token: b.token, body: { p_answer_id: aid, p_body: 'B 再改一次（走函数）' }, prefer: false,
+  });
+  check('★ 对照组：走 update_answer() 仍然能改（证明上面的"改不动"不是接口整个坏了）',
+    [200, 204].includes(r.status), `HTTP ${r.status} ${msg(r.data)}`);
+  check('走函数改完正文真的变了', (await answerRow() || {}).body === 'B 再改一次（走函数）',
+    (await answerRow() || {}).body);
+
   /* ---------- 3. 改标签 ---------- */
   r = await call('POST', '/rest/v1/rpc/set_question_tags', {
     token: a.token,

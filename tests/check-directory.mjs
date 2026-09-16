@@ -4,6 +4,8 @@
      · 三个筛选维度都工作：参赛年份 / 身份 / 名字
      · **真名只在组员及以上可见**（普通用户拿到的 real_name 是 null）—— 本次核心
      · **任何人的邮箱都不出现在界面上**，也没有「账号」这一维
+     · **昵称留空时的兜底昵称不能是邮箱前缀**（QQ 邮箱前缀 = QQ 号）
+     · **浏览记录只保留最近 30 天是真的删**（不只是前端不显示）
      · 权限还是数据库说了算：直接打 REST 验证 weekly_stats 的返回值
 
    会真的写线上数据库：建两个一次性测试账号（qa-directory-*）并把其中一个
@@ -174,6 +176,68 @@ try {
     checkNoJsErrors(s.jsErrors);
   } finally {
     s.close();
+  }
+
+  /* ---------- 4. 隐私收尾（直接打 REST，不经浏览器） ---------- */
+
+  /* 4.1 昵称留空时，兜底昵称**不能**是邮箱 @ 前面那段。
+     QQ 邮箱的前缀就是 QQ 号，而昵称是全站公开、还能被名字搜到的 ——
+     那等于把"邮箱不暴露"换个地方泄出去（handle_new_user 里有注释）。 */
+  {
+    const NO = { email: 'qa-noname@mailnull.com', password: 'test-123456' };
+    // 和前端注册时昵称留空发的 metadata 完全一致（app.js 发的是 display_name: null）
+    const nn = await ensureUser(NO.email, NO.password, { display_name: null });
+    let dn = null;
+    try {
+      const mp = await call('GET', '/rest/v1/rpc/my_profile', { token: nn.token, prefer: false });
+      const row = Array.isArray(mp.data) ? mp.data[0] : mp.data;
+      dn = row ? row.display_name : null;
+    } catch (_) { /* 下面断言成失败 */ }
+    const local = NO.email.split('@')[0];
+    check('★ 昵称留空的账号也有一个兜底昵称（不能是空）', !!dn, String(dn));
+    check('★★ 兜底昵称不是邮箱前缀（QQ 邮箱前缀 = QQ 号，等于换个地方泄漏邮箱）',
+      !!dn && !dn.includes(local) && !dn.includes('@') && !dn.includes('mailnull'), String(dn));
+  }
+
+  /* 4.2 浏览记录「只保留最近 30 天」是**真的删**，不只是前端不显示。
+     ⚠️ 必须换一条问题来触发清理：view_history 的主键是 (user_id, question_id)，
+        同一个问题再看一次只是把时间戳刷成"现在"，那条 40 天前的记录自己就变新了。 */
+  {
+    const q = await call('GET', '/rest/v1/questions?select=id&limit=3', { token: uA.token, prefer: false });
+    const Qs = (Array.isArray(q.data) ? q.data : []).map(x => x.id);
+    check('找得到 3 条问题用来测浏览记录清理', Qs.length === 3, `${Qs.length} 条`);
+
+    if (Qs.length === 3) {
+      const [qOld, qMid, qNew] = Qs;
+      const dump = () => call('DELETE',
+        `/rest/v1/view_history?user_id=eq.${uA.id}&question_id=in.(${Qs.join(',')})`,
+        { token: uA.token, prefer: false });
+      const rows = async () => ((await call('GET',
+        `/rest/v1/view_history?select=question_id,viewed_at&user_id=eq.${uA.id}&question_id=in.(${Qs.join(',')})`,
+        { token: uA.token, prefer: false })).data || []);
+      const put = (qid, iso) => call('POST', '/rest/v1/view_history', {
+        token: uA.token, prefer: false,
+        body: { user_id: uA.id, question_id: qid, viewed_at: iso },
+      });
+
+      await dump();
+      await put(qOld, new Date(Date.now() - 40 * 86400e3).toISOString());
+      await put(qMid, new Date(Date.now() - 10 * 86400e3).toISOString());
+      check('造好两条旧记录：40 天前 + 10 天前（都是本人可写的）', (await rows()).length === 2);
+
+      // 看一条**别的问题** → 顺手把 30 天前的清掉
+      await call('POST', '/rest/v1/rpc/increment_views',
+        { token: uA.token, prefer: false, body: { p_question_id: qNew } });
+
+      const left = await rows();
+      const has = id => left.some(x => x.question_id === id);
+      check('★★ 40 天前那条被真的删掉了（不只是前端不显示）', !has(qOld),
+        `还剩 ${left.length} 条：${left.map(x => x.question_id).join(', ')}`);
+      check('★ 10 天前那条**没有**被误删（清理只针对 30 天以外）', has(qMid));
+      check('刚看的那条记下来了（清理没有把新记录一起删掉）', has(qNew));
+
+      await dump();   // 收尾：别给自己留一堆测试浏览记录
+    }
   }
 } finally {
   await cleanup();
