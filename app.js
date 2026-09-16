@@ -52,6 +52,28 @@
  */
 
 /**
+ * 一条**附件**（图片或视频）。文件在 Storage 的 media 桶里，attachments 表只存元信息。
+ * ⚠️ url 是**用户可控**的字符串（谁都能往后端塞一行），所以渲染前必须过
+ *    safeMediaUrl()：只认我们自己 storage 桶下的地址，别的（javascript:、
+ *    外站图片、data:…）一律不渲染 —— 否则就是给 XSS / 挂马开了一扇门。
+ * @typedef {object} Attachment
+ * @property {string} id
+ * @property {'image'|'video'} kind
+ * @property {string} url
+ * @property {string} mime
+ * @property {number} bytes
+ */
+
+/** attachments_view 里那一行（jsonb 展开前的原始形状，字段是 snake 无关的短名）。
+ * @typedef {object} AttachmentRow
+ * @property {string} id
+ * @property {string} kind
+ * @property {string} url
+ * @property {string|null} mime
+ * @property {number|null} bytes
+ */
+
+/**
  * 列表和详情页用的问题。字段来自 mapQuestion —— 那里已经把数据库的
  * snake_case 转成了 camelCase，之后全站只用这份。
  * @typedef {object} Question
@@ -67,6 +89,7 @@
  * @property {QuestionStatus} status
  * @property {string} authorId
  * @property {number|null} editedAt
+ * @property {Attachment[]} attachments
  * @property {AuthorRef} author
  */
 
@@ -94,6 +117,7 @@
  * @property {AuthorRef} author
  * @property {string|null} parentId
  * @property {string|null} replyToUserId
+ * @property {Attachment[]} attachments
  * @property {AuthorRef|null} replyTo
  */
 
@@ -283,6 +307,7 @@
  * @property {QuestionStatus|null} status
  * @property {string} author_id
  * @property {string|null} edited_at
+ * @property {AttachmentRow[]|null} attachments
  * @property {AuthorRef|null} author
  */
 
@@ -298,6 +323,7 @@
  * @property {AuthorRef|null} author
  * @property {string|null} parent_id
  * @property {string|null} reply_to_user_id
+ * @property {AttachmentRow[]|null} attachments
  * @property {AuthorRef|null} reply_to
  */
 
@@ -1226,6 +1252,21 @@ const mapAuthor = a => ({
 });
 
 /**
+ * 视图里的 attachments 是个 jsonb 数组（见 schema.sql 第 13.5 / 22 节）。
+ * ⚠️ 一定要容忍它缺失 / 是 null：视图还没升级时前端不该整页崩掉，
+ *    退化成"没有附件"就行。
+ * @param {unknown} list
+ * @returns {Attachment[]}
+ */
+const mapAttachments = list => (Array.isArray(list) ? list : []).map(a => ({
+  id: a.id,
+  kind: a.kind === 'video' ? 'video' : 'image',
+  url: a.url,
+  mime: a.mime || '',
+  bytes: Number(a.bytes || 0),
+}));
+
+/**
  * 把 questions_view 的一行转成界面用的 Question（snake_case → camelCase）。
  * @param {QuestionRow} r
  * @returns {Question}
@@ -1243,6 +1284,7 @@ const mapQuestion = r => ({
   status: r.status || 'open',
   authorId: r.author_id,
   editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
+  attachments: mapAttachments(r.attachments),
   author: mapAuthor(r.author),
 });
 
@@ -1265,6 +1307,7 @@ const mapAnswer = r => ({
   author: mapAuthor(r.author),
   parentId: r.parent_id || null,
   replyToUserId: r.reply_to_user_id || null,
+  attachments: mapAttachments(r.attachments),
   replyTo: r.reply_to ? mapAuthor(r.reply_to) : null,
 });
 
@@ -1561,10 +1604,33 @@ const api = {
     return data.id;
   },
 
-  /** @param {string} questionId @param {string} body @returns {Promise<void>} */
+  /** @param {string} questionId @param {string} body @returns {Promise<string>} 新回答的 id */
   async addAnswer(questionId, body) {
-    const { error } = await sb.from('answers')
-      .insert({ question_id: questionId, author_id: me.id, body });
+    const { data, error } = await sb.from('answers')
+      .insert({ question_id: questionId, author_id: me.id, body })
+      .select('id').single();
+    if (error) throw error;
+    return data.id;
+  },
+
+  /**
+   * 给一条问题 / 回答挂上附件（文件已经传到 Storage 了，这里只写元信息）。
+   *
+   * ⚠️ 数据库那边的 with check 会再验一遍"挂的东西必须是自己的"——
+   *    前端这里传的 id 只是意图，改前端绕不过去（第 22.3 节）。
+   * @param {{kind: string, url: string, mime: string, bytes: number}[]} items
+   * @param {{questionId?: string, answerId?: string}} parent
+   * @returns {Promise<void>}
+   */
+  async addAttachments(items, parent) {
+    if (!items.length) return;
+    const rows = items.map((it, i) => ({
+      owner_id: me.id,
+      question_id: parent.questionId || null,
+      answer_id: parent.answerId || null,
+      kind: it.kind, url: it.url, mime: it.mime, bytes: it.bytes, position: i,
+    }));
+    const { error } = await sb.from('attachments').insert(rows);
     if (error) throw error;
   },
 
@@ -2043,6 +2109,420 @@ async function uploadAvatar(file) {
     setAvatarHint(errMsg(ex), true);
     toast(errMsg(ex));
   }
+}
+
+/* ====================== 图片附件 + 视频链接（提问、回答） ======================
+   和头像同一套路：**客户端先校验 + 压缩，真正的边界在 Storage 桶上**
+   （allowed_mime_types / file_size_limit，见 schema.sql 第 22 节）。
+
+   ⚠️ 三个刻意的设计：
+     ① 图片压到最长边 1600px 再传。手机随手拍的照片 3~8MB，压完通常几百 KB ——
+        不压的话，1GB 的免费额度几十张就没了。用原生 canvas，不引第三方库
+        （"零构建、零依赖"是这个站的前提）。
+     ② **视频不上传，只收链接**：浏览器端压不动视频（那等于把 ffmpeg 塞进页面），
+        而免费额度（1GB 存储 / 5GB 流量每月）挡不住视频文件 ——
+        一段 25MB 的视频被看 200 次就把当月流量吃光。贴 B 站 / YouTube 链接
+        几乎零成本、播放体验还更好，所以界面把"贴链接"写在输入框旁边。
+     ③ 图片先传文件、**再**建问题 / 回答。反过来的话，上传失败会留下一条
+        "正文在、图没了"的帖子，用户还没法补救（附件没有"编辑"入口）。
+        万一建帖失败，就把刚传上去的文件尽力删掉，别在桶里留垃圾。
+   ------------------------------------------------------------------------- */
+
+const MEDIA_BUCKET = 'media';
+const MEDIA_IMG_MAX_SIDE = 1600;                  // 图片最长边压到这么宽/高
+const MEDIA_IMG_MAX_BYTES = 5 * 1024 * 1024;      // 压缩**之后**还超过 5MB 就拒（原图多大不管）
+const MEDIA_MAX_COUNT = 4;                        // 一条内容最多几张图
+const MEDIA_IMG_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+/* ⚠️ **视频不上传，只收链接**（用户明确要的取舍）。
+   为什么：Supabase 免费版是 1GB 存储 / 5GB 流量每月，而浏览器端压不动视频
+   （那等于把 ffmpeg 塞进页面）。一段 25MB 的视频被看 200 次就是 5GB，当月流量
+   直接见底、全站开始报错。贴 B 站 / YouTube 链接几乎零成本，播放体验还更好。
+   所以界面上把"贴链接"写在输入框旁边的提示里，桶也只收图片（schema 第 22 节）。 */
+const VIDEO_LINK_HINTS = ['bilibili.com', 'b23.tv', 'youtube.com', 'youtu.be',
+  'v.qq.com', 'youku.com', 'ixigua.com', 'douyin.com'];
+
+/**
+ * 正在编辑的那条内容待上传的附件。
+ * 只保一份：同一时刻只会打开一个编辑器（提问页，或详情页底部的回答框），
+ * 所以不需要按表单区分 —— 但也**必须在每次渲染编辑器时清空**
+ * （见 resetPendingMedia 的调用点），否则上一次没发出去的图会跟到下一个帖子里。
+ * @type {{file: File|Blob, kind: 'image'|'video', name: string, size: number,
+ *         previewUrl: string, blob: Blob|null}[]}
+ */
+let pendingMedia = [];
+
+function resetPendingMedia() {
+  pendingMedia.forEach(m => { try { URL.revokeObjectURL(m.previewUrl); } catch (_) {} });
+  pendingMedia = [];
+}
+
+/**
+ * 校验「视频链接」：只收 http / https 的绝对地址。
+ *
+ * ⚠️ 这里**故意不做域名白名单**（只把常见站点当提示）：Q&A 里贴教程站、网盘、
+ *    自己录的 mp4 都很正常，硬拦会误伤。安全靠另外三点：
+ *      ① 只允许 http/https —— `javascript:` / `data:` / `file:` 一律拒，
+ *         数据库那边还有一条 check 约束兜底（schema.sql 第 22 节）
+ *      ② 渲染时**只当作外链**画：`target="_blank"` + `rel="noopener noreferrer nofollow"`，
+ *         而且把**域名**摆在明面上（见 videoLinkLabel），点之前就知道要去哪
+ *      ③ **绝不 iframe 嵌入** —— 嵌了的话每看一次页面就把访问者的 IP / UA 送给第三方，
+ *         等于给全站读者装了个追踪器。想看就点出去看。
+ * @param {unknown} raw
+ * @returns {string|null} 规范化后的 URL，或 null（不合法）
+ */
+function parseVideoLink(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+  let u;
+  try { u = new URL(s); } catch (_) { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  return u.href;
+}
+
+/** 外链卡片上显示的一行字：认识的主站写清楚，不认识的把域名亮出来 @param {string} url */
+function videoLinkLabel(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    const known = VIDEO_LINK_HINTS.find(k => host === k || host.endsWith('.' + k));
+    return known ? known + ' 上的视频' : host + '（外部链接）';
+  } catch (_) {
+    return '外部链接';
+  }
+}
+
+/** 人类可读的体积 @param {number} n @returns {string} */
+function fmtBytes(n) {
+  if (!n) return '0KB';
+  if (n < 1048576) return Math.max(1, Math.round(n / 1024)) + 'KB';
+  return (n / 1048576).toFixed(1) + 'MB';
+}
+
+/**
+ * 随机文件名。
+ * ⚠️ crypto.randomUUID 只在**安全上下文**（https / localhost）里有 —— 本地用
+ *    `file://` 或局域网 IP 打开时它是 undefined，所以留一条退路。
+ * @returns {string}
+ */
+function newMediaId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * 把图片按最长边 MEDIA_IMG_MAX_SIDE 等比缩小。
+ * GIF **原样返回**：canvas 只会画出第一帧，一动图就变静图了 —— 宁可大一点也别改坏。
+ * @param {File} file
+ * @returns {Promise<Blob>}
+ */
+function compressMediaImage(file) {
+  if (file.type === 'image/gif') return Promise.resolve(file);
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        const scale = Math.min(1, MEDIA_IMG_MAX_SIDE / Math.max(w, h));
+        // 本来就不大就别重画了：再编码一次只会更糊，还可能变大
+        if (scale >= 1 && file.size <= MEDIA_IMG_MAX_BYTES) return resolve(file);
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * scale));
+        c.height = Math.max(1, Math.round(h * scale));
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        // WebP 明显更小；浏览器不支持时 toBlob 会自动回退成 PNG
+        c.toBlob(
+          b => (b ? resolve(b) : reject(new Error('图片处理失败'))),
+          'image/webp', 0.85);
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('这个文件不是能识别的图片'));
+    };
+    img.src = url;
+  });
+}
+
+/** 文件的扩展名（拿不到就用 mime 兜底） @param {File|Blob} file @param {string} name */
+function mediaExt(file, name) {
+  const m = /\.([a-z0-9]+)$/i.exec(name || '');
+  if (m) return m[1].toLowerCase();
+  const byMime = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+  };
+  return byMime[file.type] || 'bin';
+}
+
+/**
+ * 把用户选中的**图片**收进 pendingMedia（校验 → 压缩 → 生成预览 URL），
+ * 然后刷新预览区。**不重渲染整个表单** —— 那样会把用户已经敲进输入框的字清掉。
+ * @param {FileList|File[]|null} files
+ */
+async function addPendingMedia(files) {
+  const list = [...(files || [])];
+  if (!list.length) return;
+  const hint = $('#media-hint');
+
+  for (const file of list) {
+    /* 视频走"贴链接"那条路（见 VIDEO_LINK_HINTS 上面的注释）：
+       选中视频文件时给一句明确的指引，而不是让它去撞桶的类型限制。 */
+    if (/^video\//.test(file.type) || /\.(mp4|webm|mov|mkv|avi)$/i.test(file.name || '')) {
+      toast('视频请贴链接（下面那个输入框），别上传文件');
+      continue;
+    }
+    if (!MEDIA_IMG_TYPES.includes(file.type)) {
+      toast('只支持图片（PNG/JPG/WebP/GIF）');
+      continue;
+    }
+    if (pendingMedia.length >= MEDIA_MAX_COUNT) {
+      toast(`一条内容最多 ${MEDIA_MAX_COUNT} 张图`);
+      break;
+    }
+
+    try {
+      const blob = await compressMediaImage(file);
+      if (blob.size > MEDIA_IMG_MAX_BYTES) {
+        toast(`这张图压完还有 ${fmtBytes(blob.size)}，超过 ${fmtBytes(MEDIA_IMG_MAX_BYTES)} 了`);
+        continue;
+      }
+      pendingMedia.push({
+        file, kind: 'image', name: file.name || '图片',
+        size: blob.size, blob, previewUrl: URL.createObjectURL(blob),
+      });
+    } catch (e) {
+      toast(e && e.message ? e.message : '这个文件处理不了');
+    }
+  }
+  renderMediaPreview();
+  if (hint) hint.textContent = mediaHintText();
+}
+
+/** @returns {string} */
+function mediaHintText() {
+  const left = MEDIA_MAX_COUNT - pendingMedia.length;
+  return `图片支持 PNG/JPG/WebP/GIF，会自动压到最长边 ${MEDIA_IMG_MAX_SIDE}px`
+    + `（压完 ≤ ${fmtBytes(MEDIA_IMG_MAX_BYTES)}）。还能加 ${left} 张。`;
+}
+
+/** 刷新预览区（图片用 object URL 直接显示） */
+function renderMediaPreview() {
+  const box = $('#media-list');
+  if (!box) return;
+  box.innerHTML = pendingMedia.map((m, i) => `
+    <div class="media-chip">
+      <img src="${esc(m.previewUrl)}" alt="">
+      <span class="media-chip-kind">图片</span>
+      <span class="media-chip-size">${fmtBytes(m.size)}</span>
+      <button type="button" class="media-chip-del" data-action="media-remove" data-i="${i}"
+              title="移除">×</button>
+    </div>`).join('');
+}
+
+/**
+ * 把 pendingMedia 传到 Storage，返回可直接写进 attachments 表的数据。
+ * 路径：`<我的 user_id>/<随机 id>.<扩展名>`（第一段是 user_id，Storage 的 RLS 靠它）。
+ * @returns {Promise<{items: {kind: string, url: string, mime: string, bytes: number}[],
+ *                    paths: string[], failed: number}>}
+ */
+async function uploadPendingMedia() {
+  const items = [], paths = [];
+  let failed = 0;
+  for (let i = 0; i < pendingMedia.length; i++) {
+    const m = pendingMedia[i];
+    const path = `${me.id}/${newMediaId()}.${mediaExt(m.blob, m.name)}`;
+    try {
+      const up = await sb.storage.from(MEDIA_BUCKET).upload(path, m.blob, {
+        contentType: m.blob.type || m.file.type, cacheControl: '31536000', upsert: false,
+      });
+      if (up.error) throw up.error;
+      const { data } = sb.storage.from(MEDIA_BUCKET).getPublicUrl(path);
+      items.push({
+        kind: 'image', url: data.publicUrl,
+        mime: m.blob.type || m.file.type || '', bytes: m.size,
+      });
+      paths.push(path);
+    } catch (e) {
+      failed++;
+      console.warn('附件上传失败：', path, e && e.message);
+    }
+  }
+  return { items, paths, failed };
+}
+
+/**
+ * 建帖失败时把刚传上去的文件尽力删掉（不删也不影响功能，只是白占额度）。
+ * ⚠️ 失败只 warn：用户此刻该看到的是"发帖失败"，不是"清理也失败了"。
+ * @param {string[]} paths
+ */
+async function removeUploadedMedia(paths) {
+  if (!paths.length) return;
+  try {
+    const r = await sb.storage.from(MEDIA_BUCKET).remove(paths);
+    if (r.error) throw r.error;
+  } catch (e) {
+    console.warn('清理已上传的附件失败：', e && e.message);
+  }
+}
+
+/**
+ * 校验附件 URL：只认我们自己 media 桶下的公开地址。
+ * ⚠️ 这是**渲染前**必须过的一道：attachments.url 是用户可控的字符串，
+ *    直接塞进 <img src> 就等于让别人能往页面上挂任意资源
+ *    （javascript: 在 img 上还好，外站追踪像素、data: 大图、换成 <video> 就难说了）。
+ *    和 safeAvatarUrl 同一个思路：白名单前缀 + 扩展名。
+ * @param {unknown} url
+ * @param {'image'|'video'} kind
+ * @returns {string|null}
+ */
+function safeMediaUrl(url, kind) {
+  if (!url) return null;
+  const base = String(CFG.SUPABASE_URL || '').replace(/\/$/, '');
+  if (!base) return null;
+  const prefix = `${base}/storage/v1/object/public/${MEDIA_BUCKET}/`;
+  const s = String(url);
+  if (!s.startsWith(prefix)) return null;
+  const ext = (s.split('?')[0].split('.').pop() || '').toLowerCase();
+  const ok = kind === 'video'
+    ? ['mp4', 'webm', 'mov']
+    : ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+  return ok.includes(ext) ? s : null;
+}
+
+/**
+ * 把一条内容的附件渲染出来：图片是缩略图网格，视频是**外链卡片**（不是播放器）。
+ *
+ * ⚠️ 两类走两道不同的白名单，都很重要：
+ *    · 图片：只画我们 media 桶下的地址（safeMediaUrl）—— 否则谁都能塞一行
+ *      外站地址，让所有看过这条问题的人都往他家服务器发一次请求
+ *    · 视频：只收 http/https 的链接，而且**只当外链画**（不带 iframe）。
+ *      嵌 iframe 的话，每看一次页面就把访问者的 IP / UA 送给第三方；
+ *      卡片上把域名亮出来，点之前就知道要去哪。
+ * 没通过白名单的**直接不显示** —— 对普通读者来说，那条数据本来就不该存在。
+ * @param {Attachment[]} list
+ * @returns {string}
+ */
+function mediaHtml(list) {
+  const imgs = [], links = [];
+  for (const a of list || []) {
+    if (a.kind === 'video') {
+      const link = parseVideoLink(a.url);
+      if (link) links.push(link);
+    } else {
+      const img = safeMediaUrl(a.url, 'image');
+      if (img) imgs.push(img);
+    }
+  }
+  if (!imgs.length && !links.length) return '';
+  return `<div class="media-wrap">
+    ${imgs.length ? `<div class="media-grid">${imgs.map(u => `
+      <figure class="media-item is-image">
+        <img src="${esc(u)}" alt="附件图片" loading="lazy"
+             data-action="media-zoom" data-src="${esc(u)}">
+      </figure>`).join('')}</div>` : ''}
+    ${links.map(u => `
+      <a class="video-link" href="${esc(u)}" target="_blank"
+         rel="noopener noreferrer nofollow" title="${esc(u)}"
+         data-action="video-link">▶ 视频：${esc(videoLinkLabel(u))}</a>`).join('')}
+  </div>`;
+}
+
+/** 点图放大：一个最简的灯箱，不引第三方库 */
+function openLightbox(src) {
+  closeLightbox();
+  const box = document.createElement('div');
+  box.className = 'lightbox';
+  box.id = 'lightbox';
+  box.dataset.action = 'media-close';
+  box.innerHTML = `<img src="${esc(src)}" alt="">`;
+  document.body.appendChild(box);
+}
+
+function closeLightbox() {
+  const el = $('#lightbox');
+  if (el) el.remove();
+}
+
+/**
+ * 编辑器里那一块「图片」「视频链接」的 UI。提问页和回答框共用。
+ * ⚠️ 用 label 包住隐藏的 file input：这样点一下就打开选择框，不用额外 JS；
+ *    拖拽和粘贴另外接（见 document 上的 dragover / paste 监听）。
+ * @param {string} idPrefix 同一页可能有多个编辑器（详情页有回答框），前缀区分
+ * @returns {string}
+ */
+function mediaFieldHtml(idPrefix) {
+  return `<div class="media-field">
+    <label class="field">
+      <span class="field-label">图片（可选）</span>
+      <div class="media-drop" data-drop="${idPrefix}">
+        <label class="media-pick">
+          <input type="file" id="${idPrefix}-media-file"
+                 accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <span class="btn btn-soft btn-sm">选择图片</span>
+        </label>
+        <span class="faint">也可以把图片拖进来，或直接粘贴截图</span>
+      </div>
+      <div class="media-list" id="media-list"></div>
+      <p class="hint" id="media-hint">${mediaHintText()}</p>
+    </label>
+
+    <label class="field">
+      <span class="field-label">视频链接（可选）</span>
+      <input name="video_link" maxlength="300" inputmode="url" autocomplete="off"
+             placeholder="https://www.bilibili.com/video/BV...">
+      <p class="hint">⚠️ 视频请<b>贴链接</b>，别上传文件：本站用的是免费额度，
+        视频文件会很快把存储和流量用光（1GB / 5GB 每月）。
+        B 站、YouTube、腾讯视频都可以，发布后显示成一个外链卡片。</p>
+    </label>
+  </div>`;
+}
+
+/**
+ * 「先传图片 → 再建帖 → 最后挂附件」的公共流程（提问和回答共用）。
+ *
+ * 视频走的是**链接**，不经过 Storage：所以这里只上传图片，
+ * 链接以 kind='video' 的一行一起写进 attachments（数据库那条 check 约束
+ * 保证它必须是 http/https，见 schema.sql 第 22 节）。
+ *
+ * 两步失败的处理**故意不一样**：
+ *   · 建帖失败 → 尽力删掉刚传上去的文件（别在 1GB 的免费额度里留垃圾），
+ *     然后把错误原样抛出去（调用点照旧 toast「发布失败」）
+ *   · 挂附件失败 → 帖子已经建好了，不该因为这一句就说"发布失败"：
+ *     内容是真的发出去了，只提示"有附件没挂上"，页面照常打开
+ * @param {string|null} videoUrl 已经校验过的视频链接（null = 没有）
+ * @param {() => Promise<string>} createPost 建帖，返回新帖 id
+ * @param {(id: string, items: {kind:string,url:string,mime:string,bytes:number}[]) => Promise<void>} attach
+ * @returns {Promise<string>} 新帖 id
+ */
+async function publishWithMedia(videoUrl, createPost, attach) {
+  const { items, paths, failed } = await uploadPendingMedia();
+  if (failed) toast(`${failed} 张图没传上去，其余的照常带上`);
+  if (videoUrl) items.push({ kind: 'video', url: videoUrl, mime: '', bytes: 0 });
+
+  let id;
+  try {
+    id = await createPost();
+  } catch (err) {
+    await removeUploadedMedia(paths);
+    throw err;
+  }
+
+  if (items.length) {
+    try {
+      await attach(id, items);
+    } catch (e) {
+      console.warn('附件记录写入失败：', e && e.message);
+      toast('内容发出去了，但有附件没能挂上');
+    }
+  }
+  resetPendingMedia();
+  return id;
 }
 
 async function openProfile() {
@@ -3244,6 +3724,7 @@ function replyHtml(r, q) {
       </span>
     </div>
     <div class="body-text">${esc(r.body)}</div>
+    ${mediaHtml(r.attachments)}
   </div>`;
 }
 
@@ -3290,6 +3771,9 @@ function replyZone(a, replies, q) {
 /* ------------------------------ 页面：详情 ------------------------------ */
 /** @param {QuestionDetail|null} q */
 function renderDetail(q) {
+  /* 新开一个详情页 = 一个新编辑器：把上一次没发出去的附件清掉
+     （用户可能在别的帖子下选好了图又跳过来）。 */
+  resetPendingMedia();
   if (!q) {
     $('#app').innerHTML = `
       <div class="empty">
@@ -3348,6 +3832,7 @@ function renderDetail(q) {
         </div>
       </div>
       <div class="body-text">${esc(a.body)}</div>
+      ${mediaHtml(a.attachments)}
       ${replyZone(a, replies, q)}
     </article>`;
   }).join('') : `
@@ -3364,6 +3849,7 @@ function renderDetail(q) {
         <label class="field">
           <textarea name="body" placeholder="尽量写清楚你的思路、踩过的坑、实际结果…" required></textarea>
         </label>
+        ${mediaFieldHtml('ans')}
         <button class="btn btn-primary" type="submit">发布回答</button>
       </form>
     </div>` : `
@@ -3389,6 +3875,7 @@ function renderDetail(q) {
       </div>
 
       <div class="body-text">${esc(q.body)}</div>
+      ${mediaHtml(q.attachments)}
 
       <div class="q-foot">
         <div>${userChip(q.author, q.createdAt)} <span class="dot">·</span>
@@ -3443,6 +3930,8 @@ function renderAsk() {
     .map(([t]) => `<button type="button" class="tag" data-action="fill-tag" data-tag="${esc(t)}">${esc(t)}</button>`)
     .join('');
 
+  resetPendingMedia();   // 新开一个编辑器：上一次没发出去的附件不能跟过来
+
   $('#app').innerHTML = `
     <a class="back" href="#/">← 回到问题列表</a>
     <div class="panel">
@@ -3458,6 +3947,7 @@ function renderAsk() {
           <textarea name="body" required
                     placeholder="补充背景、你已经试过什么、报错信息、你的环境版本…&#10;写得越具体，越容易得到有用的回答。"></textarea>
         </label>
+        ${mediaFieldHtml('ask')}
         <label class="field">
           <span class="field-label">标签</span>
           <input name="tags" placeholder="用逗号分隔，最多 5 个，比如：技术, ROS2, 踩坑">
@@ -3494,6 +3984,10 @@ function renderFatal(msg) {
 /* ------------------------------ 路由 ------------------------------ */
 async function route() {
   if (configError) { renderFatal(configError); renderUserBox(); return; }
+
+  /* 换页时把灯箱收掉：它挂在 <body> 上（不在 #app 里），
+     不主动关的话会一直浮在新页面上。 */
+  closeLightbox();
 
   const hash = location.hash || '#/';
   try {
@@ -3545,6 +4039,28 @@ document.addEventListener('click', async e => {
 
   try {
     switch (action) {
+      /* 待上传附件：移除某一个 / 点图放大 / 关掉灯箱。
+         这三个都挂在**任意位置**的元素上（预览条、正文里的图、灯箱本身），
+         所以不用管它们在不在某个容器里。 */
+      case 'media-remove': {
+        const i = Number(el.dataset.i);
+        const m = pendingMedia[i];
+        if (m) { try { URL.revokeObjectURL(m.previewUrl); } catch (_) { /* 忽略 */ } }
+        pendingMedia.splice(i, 1);
+        renderMediaPreview();
+        const hint = $('#media-hint');
+        if (hint) hint.textContent = mediaHintText();
+        break;
+      }
+
+      case 'media-zoom':
+        if (el.dataset.src) openLightbox(el.dataset.src);
+        break;
+
+      case 'media-close':
+        closeLightbox();
+        break;
+
       case 'tag':
         ui.tag = ui.tag === el.dataset.tag ? null : el.dataset.tag;
         if ((location.hash || '#/') !== '#/') location.hash = '#/';
@@ -4230,6 +4746,14 @@ document.addEventListener('change', async e => {
     input.value = '';                          // 允许重复选同一个文件
     if (file) await uploadAvatar(file);
   }
+
+  /* 提问 / 回答里加图片、视频：只收进待上传列表（发帖时才真的传） */
+  if (t.id === 'ask-media-file' || t.id === 'ans-media-file') {
+    const input = /** @type {HTMLInputElement} */ (t);
+    const files = input.files ? [...input.files] : [];
+    input.value = '';                          // 允许重复选同一个文件
+    await addPendingMedia(files);
+  }
 });
 
 /* 成员面板的排序 / 筛选（用的是 select 的 change 事件，不是 click） */
@@ -4245,6 +4769,44 @@ document.addEventListener('change', e => {
 document.addEventListener('input', e => {
   const t = /** @type {HTMLInputElement} */ (e.target);
   if (t.id === 'member-name') { ui.memberName = t.value; renderMembers(); }
+});
+
+/* 把文件**拖进来** / 直接**粘贴**截图。
+   ⚠️ 两条都必须"只在编辑器在场时才接管"：
+     · dragover / drop 认 .media-drop（拖到页面别处不该被吞掉）
+     · paste **只认剪贴板里真的有文件**——否则普通文字粘贴会被 preventDefault
+       吃掉，那是比"不能贴图"严重得多的 bug（用户会以为输入框坏了） */
+document.addEventListener('dragover', e => {
+  const t = /** @type {HTMLElement} */ (e.target);
+  const zone = t && t.closest ? t.closest('.media-drop') : null;
+  if (!zone) return;
+  e.preventDefault();             // 不拦的话浏览器会直接打开这个文件
+  zone.classList.add('is-over');
+});
+
+document.addEventListener('dragleave', e => {
+  const t = /** @type {HTMLElement} */ (e.target);
+  const zone = t && t.closest ? t.closest('.media-drop') : null;
+  if (zone) zone.classList.remove('is-over');
+});
+
+document.addEventListener('drop', async e => {
+  const t = /** @type {HTMLElement} */ (e.target);
+  const zone = t && t.closest ? t.closest('.media-drop') : null;
+  if (!zone) return;
+  e.preventDefault();
+  zone.classList.remove('is-over');
+  const dt = /** @type {DragEvent} */ (e).dataTransfer;
+  await addPendingMedia(dt ? [...dt.files] : []);
+});
+
+document.addEventListener('paste', async e => {
+  const cd = /** @type {ClipboardEvent} */ (e).clipboardData;
+  const files = cd ? [...cd.files] : [];
+  if (!files.length) return;                       // 普通文字粘贴：一点都别碰
+  if (!$('#media-list')) return;                   // 当前页面没有编辑器
+  e.preventDefault();
+  await addPendingMedia(files);
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
@@ -4480,10 +5042,24 @@ document.addEventListener('submit', async e => {
       .split(/[,，\s]+/).map(s => s.trim()).filter(Boolean).slice(0, 5);
     if (!title || !body) return;
 
+    /* 视频链接：填了就必须是个 http(s) 网址。校验放在**开始上传之前**，
+       否则用户等半天上传完才被告知链接写错了。 */
+    const linkRaw = String(fd.get('video_link') || '').trim();
+    const videoUrl = linkRaw ? parseVideoLink(linkRaw) : null;
+    if (linkRaw && !videoUrl) {
+      toast('视频链接要是一个网址（http:// 或 https:// 开头）');
+      return;
+    }
+
     const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     btn.disabled = true; btn.textContent = '发布中…';
     try {
-      const id = await api.createQuestion({ title, body, tags });
+      /* 图片先传文件、再建问题、最后挂上去（见 publishWithMedia 的注释）。
+         上传可能要好几秒，所以按钮在 await 期间一直是"发布中…"。 */
+      const id = await publishWithMedia(
+        videoUrl,
+        () => api.createQuestion({ title, body, tags }),
+        (qid, items) => api.addAttachments(items, { questionId: qid }));
       lastViewedId = null;
       location.hash = '#/q/' + id;
       await route();
@@ -4499,13 +5075,24 @@ document.addEventListener('submit', async e => {
   /* 回答 */
   if (form.id === 'answer-form') {
     e.preventDefault();
-    const body = String(new FormData(form).get('body') || '').trim();
+    const fd = new FormData(form);
+    const body = String(fd.get('body') || '').trim();
     if (!body) return;
+
+    const linkRaw = String(fd.get('video_link') || '').trim();
+    const videoUrl = linkRaw ? parseVideoLink(linkRaw) : null;
+    if (linkRaw && !videoUrl) {
+      toast('视频链接要是一个网址（http:// 或 https:// 开头）');
+      return;
+    }
 
     const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     btn.disabled = true; btn.textContent = '发布中…';
     try {
-      await api.addAnswer(form.dataset.q, body);
+      await publishWithMedia(
+        videoUrl,
+        () => api.addAnswer(form.dataset.q, body),
+        (aid, items) => api.addAttachments(items, { answerId: aid }));
       form.reset();
       await route();
       toast('回答已发布');

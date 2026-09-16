@@ -203,6 +203,67 @@ create policy "回答：只能删自己的" on public.answers
   using (auth.uid() = author_id);
 
 
+-- ---------------------------------------------------------------------------
+-- 3.1 附件表 attachments（提问 / 回答里贴的图片和视频链接）
+--
+--     一条附件 = 一行：挂在**一个**问题或**一个**回答上（两列二选一，不能都填）。
+--
+--     ⚠️ 两种 kind 的存法**不一样**，别搞混：
+--        · kind = 'image' → url 是 Storage **media 桶里的公开地址**（文件真的在桶里）
+--        · kind = 'video' → url 是**外部链接**（B 站 / YouTube / 腾讯视频…），
+--          **我们不上传视频文件**：免费额度是 1GB 存储 / 5GB 流量每月，
+--          浏览器又压不动视频，一段 25MB 的视频被看 200 次就把当月流量吃光。
+--          所以视频走"贴链接 + 前端只画成外链卡片"的路子（第 22 节有完整说明）。
+--
+--     ⚠️ 表建在这里（第 3 节），**策略在第 22 节**：第 13.5 节的
+--        questions_view / answers_view 要引用这张表，所以它必须早于视图存在；
+--        而策略要用 can_manage()（第 13.6 节才定义），只能放到后面去。
+--        （和 profiles.avatar_url 一个道理：列早、桶和策略晚。）
+--
+--     ⚠️ 为什么不把 URL 直接塞进 questions.body / answers.body：
+--        · 正文是纯文本、会被 esc() 转义后原样显示；混进 URL 就得在渲染时做
+--          "哪段是链接"的解析，那正是 XSS 最容易钻的地方
+--        · 附件要排序、要显示大小、以后可能加"仅图片"筛选 —— 一行一条最好扩展
+--        · 删账号 / 删问题时要能级联清掉它们（外键 on delete cascade 一句话的事）
+-- ---------------------------------------------------------------------------
+create table if not exists public.attachments (
+  id          uuid primary key default gen_random_uuid(),
+  -- 谁传的（= 文件路径第一段，Storage 的 RLS 按它卡）
+  owner_id    uuid not null references public.profiles(id) on delete cascade,
+  question_id uuid references public.questions(id) on delete cascade,
+  answer_id   uuid references public.answers(id)   on delete cascade,
+  kind        text not null check (kind in ('image', 'video')),
+  url         text not null,
+  -- mime / bytes 只是给前端显示用的元信息，**不参与权限判断**
+  -- （能不能传由 Storage 桶的 allowed_mime_types + file_size_limit 说了算；
+  --   视频链接这两列是空的）
+  mime        text,
+  bytes       bigint,
+  position    int  not null default 0,      -- 同一条内容里的显示顺序
+  created_at  timestamptz not null default now(),
+  -- 必须且只能挂在一个东西上：既不悬空，也不会同时属于问题和回答
+  constraint attachments_one_parent check ((question_id is null) <> (answer_id is null))
+);
+
+-- 视频**只能存 http/https 链接**，这是数据库层的兜底：
+-- 前端渲染时还会再校验一遍（parseVideoLink），但"谁都可能往库里塞一行"，
+-- 所以 `javascript:` / `data:` 这种东西要在数据库这层就写不进来 ——
+-- 这是防 XSS 的最后一道（外链卡片是个 <a href>，伪协议在 <a> 上同样危险）。
+-- ⚠️ 用 alter + drop if exists 而不是写进 create table：老库上表已经存在，
+--    `create table if not exists` 会整条跳过，约束就补不上了。
+alter table public.attachments drop constraint if exists attachments_video_is_url;
+alter table public.attachments add constraint attachments_video_is_url
+  check (kind <> 'video' or url ~* '^https?://[^[:space:]]+$');
+
+create index if not exists attachments_question_idx on public.attachments (question_id, position);
+create index if not exists attachments_answer_idx   on public.attachments (answer_id, position);
+create index if not exists attachments_owner_idx    on public.attachments (owner_id);
+
+-- ⚠️ 这里**只开 RLS，不建策略**：策略要用 can_manage()，它在第 13.6 节才定义，
+--    建在这里会因为"函数不存在"整份脚本报错。策略见第 22.3 节。
+alter table public.attachments enable row level security;
+
+
 -- ============================================================================
 -- 4. 把「最佳答案」的外键补上
 --    （questions 和 answers 互相引用，所以只能分两步建）
@@ -931,7 +992,13 @@ select
   (select count(*) from public.question_votes v where v.question_id = q.id)::int as votes,
   q.status,
   q.author_id,
-  q.edited_at
+  q.edited_at,
+  -- 附件（图片 / 视频，见第 22 节）：跟着视图一次查全，前端不用为每条问题再查一次。
+  -- 空的时候是 []（不是 null），前端就少一种分支。
+  (select coalesce(jsonb_agg(jsonb_build_object(
+            'id', t.id, 'kind', t.kind, 'url', t.url,
+            'mime', t.mime, 'bytes', t.bytes) order by t.position, t.created_at), '[]'::jsonb)
+     from public.attachments t where t.question_id = q.id) as attachments
 from public.questions q
 join public.profiles p on p.id = q.author_id;
 
@@ -961,7 +1028,13 @@ select
   -- —— 前端只要判断 reply_to 是不是 null 就够了，不用再读里面的 id。
   case when rt.id is null then null
        else jsonb_build_object('id', rt.id, 'name', rt.display_name,
-                               'role', rt.role, 'avatar_url', rt.avatar_url) end as reply_to
+                               'role', rt.role, 'avatar_url', rt.avatar_url) end as reply_to,
+  -- 附件（见第 22 节）：回答和回复共用这张视图，所以回复的附件也在这里
+  -- （目前前端只给"提问 / 顶层回答"提供上传入口，但表结构本身不限制）
+  (select coalesce(jsonb_agg(jsonb_build_object(
+            'id', t.id, 'kind', t.kind, 'url', t.url,
+            'mime', t.mime, 'bytes', t.bytes) order by t.position, t.created_at), '[]'::jsonb)
+     from public.attachments t where t.answer_id = a.id) as attachments
 from public.answers a
 join public.profiles p  on p.id  = a.author_id
 left join public.profiles rt on rt.id = a.reply_to_user_id;
@@ -2229,3 +2302,157 @@ select
   (select count(*) from public.messages)                             as 私信条数,
   (select count(*) from public.messages where read_at is null)        as 未读私信;
 
+
+
+-- ============================================================================
+-- 22. 图片附件 + 视频链接（提问、回答里能贴图、贴视频）
+--
+--     ★ 只有**图片**是上传的文件；**视频一律贴链接**（用户明确的取舍）。
+--       一个图片附件 = attachments 表的一行（表在第 3.1 节）+ media 桶里一个文件；
+--       一个视频附件 = 只有一行，url 指向 B 站 / YouTube 之类的外部地址。
+--
+--     ⚠️ 为什么视频不上传（这段算术是这条设计的全部理由）：
+--        Supabase 免费版是 **1GB 存储 / 5GB 流量每月**，而浏览器端压不动视频
+--        （要真重编码，等于把 ffmpeg 塞进页面）。25MB 一段的话，
+--        40 段就把存储用完；流量更狠 —— 一段被看 200 次就是 5GB，当月流量见底，
+--        之后全站都开始报错。贴链接几乎零成本，播放体验还比自建好。
+--
+--     media 桶：**public**（问题和回答本来就是所有人可见的，图片跟着它们走；
+--     private 桶要签名 URL，静态站没有服务端去签发）。
+--
+--     图片路径固定为 `<user_id>/<随机 id>.<扩展名>`：
+--       · 第一段是 user_id —— Storage 的 RLS 靠它表达"只有本人能往自己目录写"
+--       · 随机 id 而不是"问题 id" —— 上传时问题可能还没建出来（先传文件再建问题，
+--         这样上传失败就不会留下一条没有图的空问题）
+--
+--     ⚠️ 外链视频的两个安全点（前端 parseVideoLink + 这里的 check 约束）：
+--        · 只允许 http/https，`javascript:` / `data:` 写不进来也画不出来
+--        · 渲染时**只画成外链卡片、不 iframe 嵌入** —— 嵌了的话每看一次页面
+--          就把访问者的 IP / UA 送给第三方（等于给全站读者装追踪器）
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 22.1 建桶（幂等：重跑只是把配置改回正确值，不会清掉里面的文件）
+-- ---------------------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('media', 'media', true)
+on conflict (id) do update set public = true;
+
+-- 桶级的上限（比前端严没用，比前端松才有意义 —— 绕过前端直接调 Storage API 时，
+-- 真正拦住它的是这里）：
+--   file_size_limit     5MB —— 和前端压完后的上限一致（MEDIA_IMG_MAX_BYTES）
+--   allowed_mime_types  **只允许图片**：视频走链接，桶里就不该出现视频文件，
+--                       这样也就堵死了"绕过前端偷偷传 25MB 视频"把额度吃光这条路
+-- ⚠️ 一样用 DO 包一层：老项目可能没有这两列。
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'storage' and table_name = 'buckets'
+       and column_name = 'file_size_limit'
+  ) then
+    update storage.buckets
+       set file_size_limit    = 5242880,    -- 5MB
+           allowed_mime_types = array['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+     where id = 'media';
+  else
+    raise notice 'storage.buckets 没有 file_size_limit 列（旧版 Supabase）：跳过桶级限制，前端仍会挡';
+  end if;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 22.2 Storage 的 RLS 策略（storage.objects）
+--      · 所有人可读（问题和回答是公开的，附件跟着公开）
+--      · 写（insert / update / delete）只允许本人，且路径第一段必须是自己的 user_id
+--      ⚠️ 上传的**类型和大小**不在这里判：靠桶的 allowed_mime_types / file_size_limit
+--         （策略里也能写 storage.extension(name) 白名单，但那是第二道，见 20.2）
+-- ---------------------------------------------------------------------------
+drop policy if exists "媒体：所有人可读" on storage.objects;
+create policy "媒体：所有人可读" on storage.objects
+  for select using (bucket_id = 'media');
+
+drop policy if exists "媒体：本人可传" on storage.objects;
+create policy "媒体：本人可传" on storage.objects
+  for insert to authenticated
+  with check (
+    bucket_id = 'media'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "媒体：本人可换" on storage.objects;
+create policy "媒体：本人可换" on storage.objects
+  for update to authenticated
+  using (
+    bucket_id = 'media'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  )
+  with check (
+    bucket_id = 'media'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "媒体：本人可删" on storage.objects;
+create policy "媒体：本人可删" on storage.objects
+  for delete to authenticated
+  using (
+    bucket_id = 'media'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- ---------------------------------------------------------------------------
+-- 22.3 attachments 的权限（表在第 3.1 节，这里才建策略 —— 因为要用 can_manage()）
+--
+--     读：和问题 / 回答一样，**所有人**（含未登录访客）
+--     写：只能以自己名义，而且**挂的那个问题 / 回答必须是自己的**
+--         （不判这一条的话，任何人拿 publishable key 就能往别人的问题下塞图）
+--     删：本人，或者管得到他的管理者（和删问题同一套 can_manage）
+--     改：**没有 update 策略** —— 附件是"传上去就这样"，要换就删了重传。
+--         这样也就没有"把别人的图挪到自己帖子下面"这种路径。
+-- ---------------------------------------------------------------------------
+drop policy if exists "附件：所有人可读" on public.attachments;
+create policy "附件：所有人可读" on public.attachments
+  for select using (true);
+
+drop policy if exists "附件：只能挂在自己的内容上" on public.attachments;
+create policy "附件：只能挂在自己的内容上" on public.attachments
+  for insert to authenticated
+  with check (
+    owner_id = auth.uid()
+    and (
+      (question_id is not null and exists (
+         select 1 from public.questions q
+          where q.id = question_id and q.author_id = auth.uid()))
+      or
+      (answer_id is not null and exists (
+         select 1 from public.answers a
+          where a.id = answer_id and a.author_id = auth.uid()))
+    )
+  );
+
+drop policy if exists "附件：本人或管理者可删" on public.attachments;
+create policy "附件：本人或管理者可删" on public.attachments
+  for delete to authenticated
+  using (
+    owner_id = auth.uid()
+    -- 和删问题 / 回答同一套规则：大管理者随便删，管理者只能删严格低于自己的
+    or public.can_manage(owner_id)
+  );
+
+-- 授权：读给所有人（未登录也要能看图）；写只给登录用户，且**不给 update**
+-- （没有 update 策略 + 没有 update 授权 = 双保险）
+revoke all on public.attachments from anon, authenticated;
+grant select on public.attachments to anon, authenticated;
+grant insert, delete on public.attachments to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 22.4 附件自己的自检
+--      也把第 20.4 / 21.4 那张统计再报一遍（SQL Editor 只显示最后一张表）
+-- ---------------------------------------------------------------------------
+select
+  (select count(*) from public.profiles)                             as 总人数,
+  (select count(*) from public.profiles where avatar_url is not null) as 有自定义头像,
+  (select count(*) from public.profiles where avatar_url is null)     as 用自动生成,
+  (select count(*) from public.messages)                             as 私信条数,
+  (select count(*) from public.attachments)                          as 附件条数,
+  (select count(*) from public.attachments where kind = 'image')      as 其中图片,
+  (select count(*) from public.attachments where kind = 'video')      as 其中视频链接;

@@ -1288,6 +1288,112 @@ h1, h2, h3, p { margin: 0; }
 .dm-form textarea:focus { outline: none; border-color: var(--primary); }
 .dm-form .btn { flex: 0 0 auto; }
 
+/* ====================== 图片附件 + 视频链接 ======================
+   · .media-drop   编辑器里的拖拽区（拖到上面会高亮）
+   · .media-list   待上传的图片预览条（这些还没进正文）
+   · .media-grid   正文里真正渲染出来的图片
+   · .video-link   正文里的视频外链卡片（**不是播放器**：不嵌 iframe，
+                   免得每看一次页面就把访问者的 IP 送给第三方）
+   · .lightbox     点图放大（最简灯箱，不引第三方库）
+   深色模式下都用变量，不写死颜色。 */
+.media-drop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  transition: border-color .15s, background .15s;
+}
+.media-drop.is-over { border-color: var(--primary); background: var(--primary-soft); }
+.media-field .hint { margin-top: 6px; }
+
+.media-list { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.media-chip {
+  position: relative;
+  width: 104px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.media-chip img, .media-chip video {
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
+.media-chip-kind, .media-chip-size { font-size: 11px; color: var(--text-faint); padding: 0 6px; }
+.media-chip-del {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: rgba(0, 0, 0, .6);
+  color: #fff;
+  font-size: 14px;
+}
+
+.media-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.media-item {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #000;
+}
+/* 视频占满一整行：挤在 180px 的小格子里根本看不清 */
+.media-item img {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  display: block;
+  cursor: zoom-in;
+}
+
+/* 视频外链卡片：整行、显眼、把域名写出来（点之前就知道要去哪） */
+.video-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--primary);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+.video-link:hover { border-color: var(--primary); background: var(--primary-soft); }
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .85);
+  cursor: zoom-out;
+}
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+
 /* ====================== 小屏 ====================== */
 @media (max-width: 720px) {
   .topbar-inner { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
