@@ -845,12 +845,15 @@ grant select on public.view_history_view to authenticated;
 --      'removed' = 问题/回答被管理者删除
 --      'remind'  = 管理者提醒（比如提醒整理标签）
 --      'reply'   = 有人回复了你的回答（见第 10.3 节的 notify_on_reply）
+--      'message' = 有人给你发了私信（见第 21 节的 notify_on_message）
+--                  ⚠️ 这条通知**不带任何正文**：note 会是 null，
+--                     前端只渲染「X 给你发了私信」。
 -- ---------------------------------------------------------------------------
 alter table public.notifications add column if not exists note text;
 
 alter table public.notifications drop constraint if exists notifications_type_check;
 alter table public.notifications add constraint notifications_type_check
-  check (type in ('answer', 'accept', 'removed', 'remind', 'reply'));
+  check (type in ('answer', 'accept', 'removed', 'remind', 'reply', 'message'));
 
 -- 通知视图：补上 note、actor 的角色和头像（前端要显示"管理员"徽章 / 头像）
 -- ⚠️ note 必须**追加在最后面**：create or replace view 不允许在中途插列
@@ -1146,9 +1149,14 @@ alter table public.profiles add column if not exists comp_years int;
 -- 存基准值而不是"起始年份"是为了让现有数据零变化地迁移（见 14.1.1）。
 alter table public.profiles add column if not exists comp_years_set_year int;
 
+-- ⚠️ 上限 9999 要和前端一致（index.html 的 <input max> + app.js 的 COMP_YEARS_MAX）：
+--    数据库放宽了前端没放，用户会被一句看不懂的提示挡在表单上；
+--    前端放宽了数据库没放，请求会带着一个看不懂的 400 回来。
+--    取 9999 而不是 int 上限：要的是"理论上的最大值随便填"，但不能大到把
+--    成员目录和排序撑得没法看。下限 0 和"不许负数"没有变。
 alter table public.profiles drop constraint if exists profiles_comp_years_check;
 alter table public.profiles add constraint profiles_comp_years_check
-  check (comp_years is null or (comp_years >= 0 and comp_years <= 30));
+  check (comp_years is null or (comp_years >= 0 and comp_years <= 9999));
 
 
 -- ---------------------------------------------------------------------------
@@ -1300,8 +1308,8 @@ begin
   if auth.uid() is null then raise exception '请先登录'; end if;
 
   if v_name = '' then raise exception '昵称不能为空'; end if;
-  if p_comp_years is not null and (p_comp_years < 0 or p_comp_years > 30) then
-    raise exception '参赛年数请填 0～30 的整数';
+  if p_comp_years is not null and (p_comp_years < 0 or p_comp_years > 9999) then
+    raise exception '参赛年数请填 0～9999 的整数';
   end if;
 
   update public.profiles
@@ -1575,12 +1583,16 @@ grant execute on function public.set_question_tags(uuid, text[]) to authenticate
 --     本周与累计统计）              |         |      |        |
 --   看成员的真实姓名 real_name      |   ❌    |  ✅  |   ✅   |   ✅
 --   看任何人的邮箱                  |   ❌    |  ❌  |   ❌   |   ❌
+--   看别人的私信                    |   ❌    |  ❌  |   ❌   |   ❌ ← 见第 21 节
 --   任命 / 撤销角色                |   ❌    |  ❌  |   ❌   |   ✅
 --   群发"补全资料"提醒              |   ❌    |  ❌  |   ❌   |   ✅
 --
 --   * 「组员」没有额外的管理权限，唯一比普通用户多的就是「能看到真名」和身份徽章 ——
 --     这是刻意的：真名给到"自己人"这一档。
 --   * 邮箱对所有人（含管理者）都不通过接口暴露；本人看自己的邮箱走登录态。
+--   * ★ 私信对**所有人**都不开放 —— 连大管理者也读不到别人的私信（第 21 节）。
+--     这一行不是漏配 RLS，是故意的承诺：私信的意义就是"只有收发双方能看"。
+--     谁都能给别人发私信（"给谁发"是发信人的自由），但读只限收发双方。
 -- ---------------------------------------------------------------------------
 
 
@@ -1980,4 +1992,141 @@ select
   count(*) filter (where avatar_url is not null)        as 有自定义头像,
   count(*) filter (where avatar_url is null)            as 用自动生成
 from public.profiles;
+
+
+-- ============================================================================
+-- 21. 私信（在别人主页上点「发私信」→ 两个人之间的会话）
+--
+--     一条私信就是 messages 里的一行：sender_id → recipient_id。
+--     **不建单独的"会话表"**：会话的身份就是「这两个 user_id」，
+--     `(sender, recipient)` 两列本身已经把它表达完了。多一张 conversations
+--     只会多一份要同步的状态（最后一条是什么、未读几条…），迟早对不上。
+--
+--     ★★ 最重要的规则：只有收发双方能读，**大管理者也不行**。 ★★
+--        这不是"漏配 RLS" —— 是**故意**的例外。私信的全部意义就是"别人看不到"，
+--        一旦给管理员开个口子，等于告诉所有人"站长随时能看你发的东西"。
+--        所以下面所有 policy 用的都是 `auth.uid()`，**没有**任何
+--        `my_role()` / `can_manage()` 分支。以后想"顺手修好它"之前请先想清楚：
+--        那不是 bug，是承诺。README 的「角色与权限」一节也写了这一条。
+--
+--     ⚠️ 通知里只有"谁给你发了私信"，**没有正文**（见 21.3）：
+--        通知的 note 会被前端渲染出来，写正文等于把私信泄漏到通知列表 ——
+--        那是"私信"之外的另一条暴露面。
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 21.1 表
+-- ---------------------------------------------------------------------------
+create table if not exists public.messages (
+  id           uuid primary key default gen_random_uuid(),
+  sender_id    uuid not null references public.profiles(id) on delete cascade,
+  recipient_id uuid not null references public.profiles(id) on delete cascade,
+  -- 正文：1～2000 字。空串（或只有空白）直接挡在数据库层，
+  -- 前端那句 required 只是体验（这个项目一贯的规矩：前端不是权限）。
+  body         text not null check (length(btrim(body)) between 1 and 2000),
+  created_at   timestamptz not null default now(),
+  read_at      timestamptz,                    -- null = 收件人还没读
+  -- 不能给自己发。理由：没有第二个收件人可通知、也没有第二个人能读到，
+  -- 只会让会话列表里多出一个"自己跟自己说话"的入口。
+  -- 前端的自己主页上不显示按钮只是体验，这一条才是边界。
+  constraint messages_not_self check (sender_id <> recipient_id)
+);
+
+-- 会话查询：两个人之间按时间正序（sender/recipient 两向都要走得到，
+-- 所以两边各建一条；PostgREST 的 or 查询两个方向都会用到）
+create index if not exists messages_sender_idx
+  on public.messages (sender_id, recipient_id, created_at);
+create index if not exists messages_recipient_idx
+  on public.messages (recipient_id, sender_id, created_at);
+-- 未读查询 / 铃铛提示：收件人 + 未读 + 时间
+create index if not exists messages_unread_idx
+  on public.messages (recipient_id, created_at desc) where read_at is null;
+
+-- ---------------------------------------------------------------------------
+-- 21.2 权限：RLS 按行过滤 + 列级授权管到"列"
+--      ★ 这一段里**没有**任何管理员分支，是有意的（见本节开头）
+-- ---------------------------------------------------------------------------
+alter table public.messages enable row level security;
+
+-- 读：只有收发双方。第三方（哪怕是大管理者）拿到 0 行。
+drop policy if exists "私信：只有收发双方能读" on public.messages;
+create policy "私信：只有收发双方能读" on public.messages
+  for select to authenticated
+  using (auth.uid() = sender_id or auth.uid() = recipient_id);
+
+-- 发：只能以**自己**的名义。收件人写谁都可以（"给谁发"本来就是发信人的自由），
+-- 会被挡住的是**伪造发件人** —— 想用别人的 sender_id 插入，这条直接拒。
+drop policy if exists "私信：只能以自己名义发" on public.messages;
+create policy "私信：只能以自己名义发" on public.messages
+  for insert to authenticated
+  with check (auth.uid() = sender_id);
+
+-- 标已读：只有**收件人**能改这一行；发件人连自己发出去的那条都改不了。
+drop policy if exists "私信：只有收件人能标已读" on public.messages;
+create policy "私信：只有收件人能标已读" on public.messages
+  for update to authenticated
+  using (auth.uid() = recipient_id)
+  with check (auth.uid() = recipient_id);
+
+-- ⚠️ RLS 是按**行**管的，管不到**列**：上面的 update policy 只保证"改的是别人
+--    发给我的那一行"，不保证"只改 read_at"。所以还要一层列级授权：
+--    revoke 掉整表的 update，只 grant update (read_at)。
+--    —— 和 profiles 那边防"自己把 role 改成 super_admin"是同一个套路。
+--
+--    这里直接 revoke all 再一条条 grant，而不是只 revoke update：
+--    Supabase 对 public 里的新表有**默认授权**（anon / authenticated 会拿到
+--    增删改查一整套），不显式收掉的话，"没有 delete 授权"这句话就只是注释 ——
+--    虽然 messages 上没有 delete policy、RLS 会拒绝删除，但少一条依赖更省心。
+--    未登录的人（anon）因此连表级权限都没有：login 之前打这个接口直接是权限错，
+--    而不是"能查但返回 0 行"。
+revoke all on public.messages from anon, authenticated;
+grant select, insert on public.messages to authenticated;
+grant update (read_at) on public.messages to authenticated;
+
+-- 故意**没有 delete**：私信一旦发出，双方都删不掉 ——
+-- 否则"我说过的话"就能被单方面抹掉，对话记录也就没有意义了。
+-- 账号被注销（kick_member / auth 侧删除）时，由上面的外键 on delete cascade 一起清。
+
+-- ---------------------------------------------------------------------------
+-- 21.3 收到私信 → 给收件人一条站内通知
+--
+--      ★ 通知里**只写"谁给你发了私信"，绝不带正文** ★
+--        通知的 note 字段会被前端渲染（见 renderNotices），带正文等于把
+--        私信内容泄漏到通知列表里。所以这里 note 一律 null，
+--        前端看到 type='message' 只显示「X 给你发了私信」，不带摘要。
+--
+--      sender_id 已经由 RLS 钉死成 auth.uid()（见 21.2），所以这里不需要像
+--      notify_on_reply 那样再做"发件人白名单"校验 —— 触发器的输入天生可信。
+--      通知的 actor_id 就是发信人，前端据此打开和 TA 的会话。
+-- ---------------------------------------------------------------------------
+create or replace function public.notify_on_message()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.notifications (user_id, actor_id, type, note)
+  values (new.recipient_id, new.sender_id, 'message', null);
+  return new;
+end;
+$$;
+
+drop trigger if exists on_message_created on public.messages;
+create trigger on_message_created
+  after insert on public.messages
+  for each row execute function public.notify_on_message();
+
+-- ---------------------------------------------------------------------------
+-- 21.4 自检：私信总条数 / 未读条数
+--      ⚠️ 顺带把第 20.4 节那张资料统计也报一遍：SQL Editor 只显示**最后**一张
+--         结果表，这里不再 select 一次的话，用户跑完整份脚本就看不到
+--         「总人数 / 有自定义头像」那三列了（会以为脚本没跑完）。
+-- ---------------------------------------------------------------------------
+select
+  (select count(*) from public.profiles)                             as 总人数,
+  (select count(*) from public.profiles where avatar_url is not null) as 有自定义头像,
+  (select count(*) from public.profiles where avatar_url is null)     as 用自动生成,
+  (select count(*) from public.messages)                             as 私信条数,
+  (select count(*) from public.messages where read_at is null)        as 未读私信;
 

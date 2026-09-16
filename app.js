@@ -151,6 +151,25 @@
  */
 
 /**
+ * 一条**私信**（messages 表的一行）。
+ *
+ * ⚠️ 这里**故意没有作者信息**（不像 questions_view 会把昵称 / 头像一起带出来）：
+ *    私信表不 join profiles，会话里另一方的昵称由 api.getUserBrief() 单独取一次。
+ *    这样"消息"这条数据通路上根本不经过 profiles —— 也就没有机会顺手把
+ *    真实姓名 / 邮箱带进会话页面。少一条路径就少一类泄漏。
+ *
+ * senderId 和 me.id 比较就知道这条是自己发的还是对方发的。
+ * readAt 为 null = 收件人还没读（只有收件人能写，见 schema.sql 第 21 节）。
+ * @typedef {object} Message
+ * @property {string} id
+ * @property {string} senderId
+ * @property {string} recipientId
+ * @property {string} body
+ * @property {number} createdAt
+ * @property {number|null} readAt
+ */
+
+/**
  * 一条登录方式（Supabase auth 的 identity 对象，只列我们用到的字段）。
  * 不同版本里主键叫 identity_id 或 id，所以 identityKey() 两个都认。
  * @typedef {object} Identity
@@ -282,6 +301,18 @@
  * @property {AuthorRef|null} reply_to
  */
 
+/**
+ * messages 表返回的一行（数据库那边是 snake_case）。
+ * 只有收发双方能 select 到行（RLS），这里列的是我们能拿到的全部字段。
+ * @typedef {object} MessageRow
+ * @property {string} id
+ * @property {string} sender_id
+ * @property {string} recipient_id
+ * @property {string} body
+ * @property {string} created_at
+ * @property {string|null} read_at
+ */
+
 /* ------------------------------ 小工具 ------------------------------ */
 /* ⚠️ $ / $$ 的返回值**故意不标类型**（tsc 现在从 root.querySelector 推出来就是 any）。
    同一个 helper 要服务 input / textarea / select / div…，写成任何一个具体元素类型，
@@ -298,6 +329,16 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
  */
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/* 参赛年数的上限。**三处必须保持一致**，少改一处用户就会被拦住：
+     · index.html 的 <input type="number" max>（只是浏览器的提示，绕得过）
+     · 这里（前端提交前的校验）
+     · supabase/schema.sql：profiles 的 check 约束 + update_profile() 里的判断
+       （这两处才是真正说了算的边界 —— 前端隐藏按钮 / 少写一句校验都不是权限）
+   取 9999 而不是 int 的上限 2147483647：本意是"给到理论上的最大，随便填"，
+   但真用 int 上限的话，成员目录 / 排序 / 表单宽度都会被那个十位数撑得很难看。
+   下限 0 一直是 0，负数照旧不允许 —— 放宽上限时别把它一起放了。 */
+const COMP_YEARS_MAX = 9999;
 
 /** @param {number} ts 毫秒时间戳 @returns {string} */
 function timeAgo(ts) {
@@ -536,6 +577,8 @@ let myAnswers = [];
 let myViews = [];
 /** @type {Answer[]} 正在看的**别人**的回答（#/u/<id> 主页） */
 let userAnswers = [];
+/** @type {Message[]} 当前私信会话（#/m/<id>）里的往来消息，按时间正序 */
+let dmMessages = [];
 /** @type {Profile[]} 成员目录（所有登录用户可看） */
 let members = [];
 /** @type {QuestionDetail|null} 当前正在看的问题（编辑时要从这里取原文） */
@@ -1225,6 +1268,16 @@ const mapAnswer = r => ({
   replyTo: r.reply_to ? mapAuthor(r.reply_to) : null,
 });
 
+/** @param {MessageRow} r @returns {Message} */
+const mapMessage = r => ({
+  id: r.id,
+  senderId: r.sender_id,
+  recipientId: r.recipient_id,
+  body: r.body,
+  createdAt: Date.parse(r.created_at),
+  readAt: r.read_at ? Date.parse(r.read_at) : null,
+});
+
 const api = {
   /** @returns {Promise<Question[]>} 全部问题（新的在前），同时刷新模块级缓存 questions */
   async list() {
@@ -1583,6 +1636,89 @@ const api = {
   /** @param {string} id @returns {Promise<void>} 失败不影响页面（调用点自己 catch 掉） */
   async bumpViews(id) {
     await sb.rpc('increment_views', { p_question_id: id });
+  },
+
+  /* ---- 私信 ----
+     数据只有一张 messages 表（没有会话表），会话 = (sender, recipient) 这一对。
+     四件事：取对方公开资料 / 拉会话 / 发一条 / 把收到的标已读。
+     ⚠️ 能从接口拿到什么**完全由数据库决定**（schema.sql 第 21 节）：
+        读只有收发双方、写只能以自己名义、update 只有 read_at 一列。
+        这里写的条件只是"取我想要的那部分"，不是安全边界。 */
+
+  /**
+   * 取一个人的**公开**资料（昵称 / 身份 / 头像），给会话页顶部用。
+   * ⚠️ 只 select 授权放开的那几列 —— 真实姓名、邮箱**根本不在这条查询里**，
+   *    所以会话页面不可能"顺手"把邮箱显示出来（不是靠前端不渲染，是拿不到）。
+   * 查不到（人已注销）返回 null，调用点退化成「成员」。
+   * @param {string} userId
+   * @returns {Promise<AuthorRef|null>}
+   */
+  async getUserBrief(userId) {
+    const { data, error } = await sb.from('profiles')
+      .select('id,display_name,role,avatar_url').eq('id', userId).maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    return mapAuthor({
+      id: data.id, name: data.display_name, role: data.role, avatar_url: data.avatar_url,
+    });
+  },
+
+  /**
+   * 我和某个人之间的往来私信，按时间**正序**（先发的在前）。
+   * or(and(...)) 把"我发给他"和"他发给我"两个方向都取上；
+   * 就算这个条件被改坏，数据库的 RLS 也只会返回我参与的那些行。
+   * 显式写列名而不是 select * ：将来给表加内部列时不会自动带出去。
+   * 上限 500 条：**先按时间倒序取最新 500 条，再翻回正序**显示 ——
+   * 直接升序 + limit 拿到的是"最早的 500 条"，会话一长就永远看不到新消息。
+   * @param {string} otherId
+   * @returns {Promise<Message[]>}
+   */
+  async loadConversation(otherId) {
+    const { data, error } = await sb.from('messages')
+      .select('id,sender_id,recipient_id,body,created_at,read_at')
+      .or(`and(sender_id.eq.${me.id},recipient_id.eq.${otherId}),`
+        + `and(sender_id.eq.${otherId},recipient_id.eq.${me.id})`)
+      .order('created_at', { ascending: false })
+      .limit(500);
+    if (error) throw error;
+    dmMessages = data.map(mapMessage).reverse();   // 页面里按正序（先发的在前）
+    return dmMessages;
+  },
+
+  /** @param {string} otherId @param {string} body @returns {Promise<void>} */
+  async sendMessage(otherId, body) {
+    // sender_id 写自己：伪造发件人在数据库层会被 with check 拒掉
+    const { error } = await sb.from('messages')
+      .insert({ sender_id: me.id, recipient_id: otherId, body });
+    if (error) throw error;
+  },
+
+  /**
+   * 把这个人发给我的未读私信全部标为已读，并把对应的「私信」通知也标掉。
+   * 两件事一起做是为了铃铛不打架：消息读了但铃铛还红着，用户会以为没读到。
+   * @param {string} otherId
+   * @returns {Promise<void>}
+   */
+  async markConversationRead(otherId) {
+    const now = new Date().toISOString();
+    // 条件里带上 recipient_id = 我：只有收件人能标已读（RLS 也会再挡一次）
+    const { error } = await sb.from('messages')
+      .update({ read_at: now })
+      .eq('sender_id', otherId).eq('recipient_id', me.id).is('read_at', null);
+    if (error) throw error;
+
+    /* 通知只是"提示"，标失败不该让会话页报错，所以单独 try 掉。
+       本地那份 notices 也一起改，省得再拉一次接口。 */
+    try {
+      await sb.from('notifications')
+        .update({ is_read: true })
+        .eq('user_id', me.id).eq('actor_id', otherId)
+        .eq('type', 'message').eq('is_read', false);
+      notices.forEach(n => { if (n.type === 'message' && n.actor.id === otherId) n.isRead = true; });
+      renderBell();
+    } catch (e) {
+      console.warn('私信通知标已读失败：', e.message);
+    }
   },
 };
 
@@ -1995,7 +2131,7 @@ function renderNotices() {
         <div class="big">🔔</div>
         <p>还没有通知。</p>
         <p class="faint" style="margin-top:6px">
-          有人回答你的问题、或你的回答被选为最佳答案时，会出现在这里。
+          有人回答你的问题、你的回答被选为最佳答案，或者有人给你发了私信时，会出现在这里。
         </p>
       </div>`;
     return;
@@ -2016,12 +2152,24 @@ function renderNotices() {
       text = `<b>${esc(n.actor.name)}</b> 删除了你的一个问题 <span class="notice-q">${esc(n.note || '')}</span>`;
     } else if (n.type === 'remind') {
       text = `<b>${esc(n.actor.name)}</b> 提醒你：<span class="notice-q">${esc(n.note || '')}</span>`;
+    } else if (n.type === 'message') {
+      /* ★ 私信通知里**只有"谁给你发了私信"，一个字正文都没有**。
+         数据库写这条通知时 note 就是 null（见 schema.sql 的 notify_on_message），
+         这里也**绝不能**去读 note 当摘要 —— 那等于把私信内容搬进通知列表，
+         而通知列表是比会话页更"松"的一条暴露面（弹窗一开就渲染出来）。
+         要读内容就点进去，那是收发双方才有权限的会话页。 */
+      text = `<b>${esc(n.actor.name)}</b> 给你发了私信`;
     } else {
       text = `<b>${esc(n.actor.name)}</b> ${esc(n.note || '给你发了一条通知')}`;
     }
 
+    /* 私信通知点击后打开**和这个人的会话**（通知里没有 question_id）。
+       data-u 只在这条分支上加，其它通知仍然走 data-q 跳问题。 */
+    const dmUser = (n.type === 'message' && n.actor && n.actor.id) ? n.actor.id : '';
+
     return `<button class="notice ${n.isRead ? '' : 'is-unread'}"
-              data-action="notice-open" data-id="${n.id}" data-q="${n.questionId || ''}">
+              data-action="notice-open" data-id="${n.id}" data-q="${n.questionId || ''}"
+              ${dmUser ? `data-u="${esc(dmUser)}"` : ''}>
       <span class="dot2" ${n.isRead ? 'style="visibility:hidden"' : ''}></span>
       ${avatarHtml(n.actor, '', 'held')}
       <span class="notice-body">
@@ -2816,11 +2964,21 @@ function memberHead(userId, answers) {
      拉不到目录时退化成问题 / 回答里带的作者头像，再没有就是首字 + 颜色。 */
   const avatarUrl = (m && m.avatar_url) || (fallback && fallback.avatarUrl) || null;
 
+  /* 「发私信」入口。**自己的主页不会走到这里** —— renderUserPage 只在 !isSelf 时
+     才调用 memberHead，所以"给自己发私信"这个入口天然不存在。
+     就算有人手改 DOM 造出这个按钮，数据库的 messages_not_self 约束也会拒掉
+     （前端不放按钮从来不是权限，这个项目一贯如此）。 */
+  const dmEntry = `<div class="member-head-actions">
+      <button class="btn btn-soft btn-sm" data-action="dm"
+              data-u="${esc(userId)}">发私信</button>
+    </div>`;
+
   return `<div class="panel member-head">
     <div>${userChip({ id: userId, name, role, avatarUrl }, null, 'lg')}</div>
     <div class="member-meta">
       ${real}<span>参赛 ${years}</span>${counts}
     </div>
+    ${dmEntry}
   </div>`;
 }
 
@@ -2917,6 +3075,119 @@ async function renderUserPage(userId, { isSelf }) {
       <span class="faint">${ui.meTab === 'views' ? '只保留最近 30 天 · 只有你自己看得到' : ''}</span>
     </div>
     <div>${body}</div>`;
+}
+
+/* --------------------------- 私信会话（#/m/<user_id>） ---------------------------
+   入口有两个：别人主页上的「发私信」，和通知里的「X 给你发了私信」。
+   · 消息按时间**正序**（先发的在前），输入框在底部
+   · 一打开就把对方发来的未读标成已读（顺手把铃铛里对应的通知也标掉）
+   · 会话页里**不出现任何邮箱**：对方资料只取了昵称 / 身份 / 头像三样
+     （见 api.getUserBrief —— 真名和邮箱根本不在那次查询里），
+     消息本身也只有正文和时间（见 Message 那个 typedef）
+   · ⚠️ 会话没有自己的 id —— "这两个 user_id 之间"就是会话的身份。
+     所以路由直接用对方的 id：第三方（哪怕大管理者）手动打开这个地址，
+     RLS 返回 0 行，只会看到一句"你们还没聊过"，看不到任何东西。
+   -------------------------------------------------------------------------------- */
+
+/**
+ * 一条消息气泡。刻意**不显示昵称 / 头像**（页面顶部已经有一次了）：
+ * 每行再画一遍只会让窄屏更挤，也少一个把资料信息带进消息流的机会。
+ * @param {Message} m
+ * @returns {string}
+ */
+function dmBubble(m) {
+  const mine = !!(me && m.senderId === me.id);
+  return `<div class="dm-msg ${mine ? 'is-mine' : 'is-theirs'}">
+    <div class="dm-text">${esc(m.body)}</div>
+    <div class="dm-meta">${timeAgo(m.createdAt)}${mine && m.readAt ? ' · 已读' : ''}</div>
+  </div>`;
+}
+
+/** @param {string} otherId @returns {Promise<void>} */
+async function renderDm(otherId) {
+  if (!me) {
+    $('#app').innerHTML = `
+      <a class="back" href="#/">← 回到问题列表</a>
+      <div class="gate">
+        <p>登录后才能看私信。</p>
+        <button class="btn btn-primary" data-action="login">登录 / 注册</button>
+      </div>`;
+    return;
+  }
+
+  /* 地址栏里的 id 是手写/改过的可能：不是 UUID 就别往后端发（后端会回一个
+     "invalid input syntax for type uuid" 的英文错，用户看不懂）。 */
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(otherId)) {
+    $('#app').innerHTML = `
+      <a class="back" href="#/">← 回到问题列表</a>
+      <div class="empty">
+        <div class="big">✉️</div>
+        <p>没找到这个人。</p>
+        <p class="faint" style="margin-top:6px">从成员目录或别人主页上的「发私信」进来。</p>
+      </div>`;
+    return;
+  }
+
+  /* 自己的会话页没有意义：数据库里 messages_not_self 也不允许给自己发。
+     直接把人送回自己的主页，而不是给一个永远空的输入框。 */
+  if (otherId === me.id) {
+    $('#app').innerHTML = `
+      <a class="back" href="#/u/${encodeURIComponent(me.id)}">← 回到我的主页</a>
+      <div class="empty">
+        <div class="big">✉️</div>
+        <p>不能给自己发私信。</p>
+      </div>`;
+    return;
+  }
+
+  /* 对方资料取不到（账号已注销 / 网络）不致命：退化成「成员」，消息照样能看。 */
+  let other = null;
+  try { other = await api.getUserBrief(otherId); } catch (_) { /* 忽略 */ }
+  const peer = other || mapAuthor({ id: otherId, name: '成员' });
+
+  const msgs = await api.loadConversation(otherId);
+
+  /* 先把未读数记下来 —— 标成已读之后就看不出来了，而那正是要给用户的提示。 */
+  const unread = msgs.filter(m => m.recipientId === me.id && !m.readAt).length;
+  if (unread) {
+    try {
+      await api.markConversationRead(otherId);
+      msgs.forEach(m => { if (m.recipientId === me.id && !m.readAt) m.readAt = Date.now(); });
+    } catch (e) {
+      // 标已读失败不影响看消息，只是铃铛还会红着
+      console.warn('标记私信已读失败：', e.message);
+    }
+  }
+
+  const list = msgs.length
+    ? msgs.map(dmBubble).join('')
+    : `<div class="empty" style="padding:26px 12px">
+         <div class="big">✉️</div>
+         <p>你们还没聊过。</p>
+         <p class="faint" style="margin-top:6px">在下面写第一句吧。</p>
+       </div>`;
+
+  /* 底部是 <form>，回车（或点「发送」）就能发；maxlength 和数据库的
+     check（1～2000 字）对齐，两边不一致的话用户会撞上一个看不懂的 400。 */
+  $('#app').innerHTML = `
+    <a class="back" href="#/u/${encodeURIComponent(otherId)}">← 回到 TA 的主页</a>
+    <div class="panel dm-head">
+      <div>${userChip(peer, null, 'lg')}</div>
+      <div class="dm-hint">${unread
+        ? `有 ${unread} 条新消息，已标为已读`
+        : '私信只有你们两个人能读到'}</div>
+    </div>
+    <div class="dm-list" id="dm-list">${list}</div>
+    <form id="dm-form" class="dm-form" data-u="${esc(otherId)}">
+      <textarea name="body" maxlength="2000" rows="2" required
+        placeholder="给 ${esc(peer.name)} 写点什么…"></textarea>
+      <button type="submit" class="btn btn-primary">发送</button>
+    </form>
+    <p class="hint">只有你和 ${esc(peer.name)} 能看到这些消息，大管理者也看不到。</p>`;
+
+  // 打开就滚到最新一条（会话长了不用自己往下拖）
+  const box = $('#dm-list');
+  if (box) box.scrollTop = box.scrollHeight;
 }
 
 /* --------------------------- 回复（B 站式一层平铺） ---------------------------
@@ -3238,6 +3509,11 @@ async function route() {
             不能还压着一层「我的账号」。 */
       closeMembers(); closeProfile(); closeNotices();
       await renderUser(decodeURIComponent(hash.slice(4)));
+    } else if (hash.startsWith('#/m/')) {
+      /* 私信会话：从别人主页的「发私信」或通知里进来。
+         弹窗一并收掉，理由和上面 #/u/ 那条一样（它们不在 #app 里，不会被重渲染冲掉）。 */
+      closeMembers(); closeProfile(); closeNotices();
+      await renderDm(decodeURIComponent(hash.slice(4)));
     } else if (hash === '#/me') {
       await renderMy();
     } else if (hash === '#/ask') {
@@ -3308,6 +3584,19 @@ document.addEventListener('click', async e => {
         if (!uid) return;
         closeNotices(); closeMembers();
         location.hash = '#/u/' + encodeURIComponent(uid);
+        break;
+      }
+
+      case 'dm': {
+        /* 别人主页上的「发私信」。没登录先去登录（私信表对未登录完全关闭）。
+           自己 → 自己再挡一次：主页上不会画这个按钮，但事件委托拦的是 DOM，
+           DOM 可以被手改 —— 挡在这里比信任按钮存在要稳。 */
+        if (!requireLogin()) return;
+        const uid = el.dataset.u;
+        if (!uid || (me && uid === me.id)) return;
+        closeMembers(); closeProfile(); closeNotices();
+        if (location.hash === '#/m/' + encodeURIComponent(uid)) await renderDm(uid);
+        else location.hash = '#/m/' + encodeURIComponent(uid);
         break;
       }
 
@@ -3627,6 +3916,10 @@ document.addEventListener('click', async e => {
         if (el.dataset.q) {
           closeNotices();
           location.hash = '#/q/' + el.dataset.q;
+        } else if (el.dataset.u) {
+          /* 私信通知：进和发件人的会话页（通知里没有 question_id，只有人） */
+          closeNotices();
+          location.hash = '#/m/' + encodeURIComponent(el.dataset.u);
         }
         break;
       }
@@ -4067,8 +4360,8 @@ document.addEventListener('submit', async e => {
     errEl.classList.add('hidden');
 
     if (!name) { errEl.textContent = '昵称不能为空'; errEl.classList.remove('hidden'); return; }
-    if (compYears !== null && (!Number.isInteger(compYears) || compYears < 0 || compYears > 30)) {
-      errEl.textContent = '参赛年数请填 0～30 的整数';
+    if (compYears !== null && (!Number.isInteger(compYears) || compYears < 0 || compYears > COMP_YEARS_MAX)) {
+      errEl.textContent = `参赛年数请填 0～${COMP_YEARS_MAX} 的整数`;
       errEl.classList.remove('hidden');
       return;
     }
@@ -4096,6 +4389,34 @@ document.addEventListener('submit', async e => {
     } finally {
       btn.disabled = false;
       btn.textContent = original;
+    }
+    return;
+  }
+
+  /* 发私信（#/m/<id> 底部的输入框） */
+  if (form.id === 'dm-form') {
+    e.preventDefault();
+    if (!me) return;
+
+    const otherId = form.dataset.u || '';
+    const bodyEl = /** @type {HTMLTextAreaElement} */ (form.querySelector('[name=body]'));
+    const body = String(bodyEl.value || '').trim();
+    const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
+    if (!otherId || !body) return;      // 空消息不发（数据库的 check 也会拒）
+
+    btn.disabled = true;
+    try {
+      await api.sendMessage(otherId, body);
+      bodyEl.value = '';
+      /* 重新拉一次会话再画，而不是把这条 push 进本地数组：
+         时间戳 / id 都由数据库生成，以服务端那份为准最省心。 */
+      await renderDm(otherId);
+    } catch (err) {
+      toast(errMsg(explain(err)));
+    } finally {
+      /* renderDm 已经把整个 #app 换掉了，这里的 btn 可能已经脱离文档；
+         设回去只是兜底，没有副作用。 */
+      btn.disabled = false;
     }
     return;
   }

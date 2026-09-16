@@ -82,6 +82,13 @@
 
     <div class="divider"><span>或者用邮箱</span></div>
 
+    <!-- 很多人以为这里只能用 GitHub 或"正经"邮箱，其实 QQ 邮箱完全能用。
+         只说"邮箱注册 / 登录"这一条路：我们**没有**接 QQ 一键登录，
+         写成"用 QQ 登录"会让人以为点一下就能授权，点了却找不到入口。 -->
+    <p class="hint" id="email-hint" style="margin:0 0 12px">
+      QQ 邮箱也能注册和登录，不用特意去申请别的邮箱。
+    </p>
+
     <form id="auth-form">
       <label class="field signup-only">
         <span class="field-label">昵称（别人看到的名字）</span>
@@ -149,7 +156,7 @@
       </label>
       <label class="field">
         <span class="field-label">参赛年数</span>
-        <input name="comp_years" type="number" min="0" max="30" placeholder="例如：3">
+        <input name="comp_years" type="number" min="0" max="9999" placeholder="例如：3">
       </label>
       <p class="form-error hidden" id="profile-error"></p>
       <div class="modal-actions">
