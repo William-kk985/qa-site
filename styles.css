@@ -1204,6 +1204,12 @@ h1, h2, h3, p { margin: 0; }
 }
 .reply-form textarea:focus { border-color: var(--primary); }
 .reply-form button[type=submit] { margin-top: 6px; }
+/* 发布回复 + 「＋ 图片 / 视频链接」同一行；附件区默认收起（.hidden），
+   展开后窄一点 —— 评论区里别占太多地方 */
+.reply-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.reply-form .media-field { margin-top: 10px; }
+.reply-form .media-field .media-drop { padding: 8px 10px; }
+.reply-form .media-field .field-label { font-size: 12.5px; }
 .reply-hint { font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; }
 .reply-hint b { color: var(--text); }
 

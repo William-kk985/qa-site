@@ -64,6 +64,16 @@
  * @property {number} bytes
  */
 
+/** 一张还没上传的图片（压缩后的 blob + 预览用的 object URL）。
+ * @typedef {object} PendingMedia
+ * @property {File} file
+ * @property {'image'} kind
+ * @property {string} name
+ * @property {number} size
+ * @property {Blob} blob
+ * @property {string} previewUrl
+ */
+
 /** attachments_view 里那一行（jsonb 展开前的原始形状，字段是 snake 无关的短名）。
  * @typedef {object} AttachmentRow
  * @property {string} id
@@ -1647,17 +1657,18 @@ const api = {
    * @param {string} parentId 顶层回答的 id
    * @param {string|null} replyToUserId 回复谁；null = 直接回复这条回答
    * @param {string} body
-   * @returns {Promise<void>}
+   * @returns {Promise<string>} 新回复的 id（用来挂附件）
    */
   async addReply(questionId, parentId, replyToUserId, body) {
-    const { error } = await sb.from('answers').insert({
+    const { data, error } = await sb.from('answers').insert({
       question_id: questionId,
       author_id: me.id,
       body,
       parent_id: parentId,
       reply_to_user_id: replyToUserId,
-    });
+    }).select('id').single();
     if (error) throw error;
+    return data.id;
   },
 
   /** @param {string} questionId @param {string|null} answerId 回答点赞传 answerId，问题点赞传 null @returns {Promise<void>} */
@@ -2143,18 +2154,33 @@ const VIDEO_LINK_HINTS = ['bilibili.com', 'b23.tv', 'youtube.com', 'youtu.be',
   'v.qq.com', 'youku.com', 'ixigua.com', 'douyin.com'];
 
 /**
- * 正在编辑的那条内容待上传的附件。
- * 只保一份：同一时刻只会打开一个编辑器（提问页，或详情页底部的回答框），
- * 所以不需要按表单区分 —— 但也**必须在每次渲染编辑器时清空**
- * （见 resetPendingMedia 的调用点），否则上一次没发出去的图会跟到下一个帖子里。
- * @type {{file: File|Blob, kind: 'image'|'video', name: string, size: number,
- *         previewUrl: string, blob: Blob|null}[]}
+ * 待上传的图片，**按编辑器分开存**。
+ *
+ * ⚠️ 为什么不是一个全局数组：详情页上同时存在**多个**编辑器 ——
+ *    底部的回答框，加上每条顶层回答下面那个回复框（回复框本身又可能展开好几个）。
+ *    用一份全局数组的话，在 A 框选好图、又去 B 框选一张，两张会一起挂到 B 上。
+ *    所以 key 用编辑器的前缀（'ask' / 'ans' / 'rep-<回答 id>'）。
+ * @type {Map<string, PendingMedia[]>}
  */
-let pendingMedia = [];
+const pendingMediaByOwner = new Map();
 
-function resetPendingMedia() {
-  pendingMedia.forEach(m => { try { URL.revokeObjectURL(m.previewUrl); } catch (_) {} });
-  pendingMedia = [];
+/** @param {string} owner @returns {PendingMedia[]} */
+function pendingOf(owner) {
+  if (!pendingMediaByOwner.has(owner)) pendingMediaByOwner.set(owner, []);
+  return /** @type {PendingMedia[]} */ (pendingMediaByOwner.get(owner));
+}
+
+/** 丢掉某个编辑器里没发出去的图片（撤回预览用的 object URL） @param {string} owner */
+function resetPendingMedia(owner) {
+  for (const m of pendingOf(owner)) {
+    try { URL.revokeObjectURL(m.previewUrl); } catch (_) { /* 忽略 */ }
+  }
+  pendingMediaByOwner.delete(owner);
+}
+
+/** 整页重渲染时把**所有**编辑器里没发出去的图片都丢掉 */
+function resetAllPendingMedia() {
+  for (const owner of [...pendingMediaByOwner.keys()]) resetPendingMedia(owner);
 }
 
 /**
@@ -2261,14 +2287,17 @@ function mediaExt(file, name) {
 }
 
 /**
- * 把用户选中的**图片**收进 pendingMedia（校验 → 压缩 → 生成预览 URL），
- * 然后刷新预览区。**不重渲染整个表单** —— 那样会把用户已经敲进输入框的字清掉。
+ * 把用户选中的**图片**收进某个编辑器的待上传列表（校验 → 压缩 → 生成预览 URL），
+ * 然后只刷新那一个编辑器的预览区。**不重渲染整个表单** ——
+ * 那样会把用户已经敲进输入框的字清掉。
+ * @param {string} owner 编辑器前缀（'ask' / 'ans' / 'rep-<id>'）
  * @param {FileList|File[]|null} files
  */
-async function addPendingMedia(files) {
+async function addPendingMedia(owner, files) {
   const list = [...(files || [])];
   if (!list.length) return;
-  const hint = $('#media-hint');
+  const items = pendingOf(owner);
+  const hint = $('#' + owner + '-media-hint');
 
   for (const file of list) {
     /* 视频走"贴链接"那条路（见 VIDEO_LINK_HINTS 上面的注释）：
@@ -2281,7 +2310,7 @@ async function addPendingMedia(files) {
       toast('只支持图片（PNG/JPG/WebP/GIF）');
       continue;
     }
-    if (pendingMedia.length >= MEDIA_MAX_COUNT) {
+    if (items.length >= MEDIA_MAX_COUNT) {
       toast(`一条内容最多 ${MEDIA_MAX_COUNT} 张图`);
       break;
     }
@@ -2292,7 +2321,7 @@ async function addPendingMedia(files) {
         toast(`这张图压完还有 ${fmtBytes(blob.size)}，超过 ${fmtBytes(MEDIA_IMG_MAX_BYTES)} 了`);
         continue;
       }
-      pendingMedia.push({
+      items.push({
         file, kind: 'image', name: file.name || '图片',
         size: blob.size, blob, previewUrl: URL.createObjectURL(blob),
       });
@@ -2300,42 +2329,44 @@ async function addPendingMedia(files) {
       toast(e && e.message ? e.message : '这个文件处理不了');
     }
   }
-  renderMediaPreview();
-  if (hint) hint.textContent = mediaHintText();
+  renderMediaPreview(owner);
+  if (hint) hint.textContent = mediaHintText(owner);
 }
 
-/** @returns {string} */
-function mediaHintText() {
-  const left = MEDIA_MAX_COUNT - pendingMedia.length;
+/** @param {string} owner @returns {string} */
+function mediaHintText(owner) {
+  const left = MEDIA_MAX_COUNT - pendingOf(owner).length;
   return `图片支持 PNG/JPG/WebP/GIF，会自动压到最长边 ${MEDIA_IMG_MAX_SIDE}px`
     + `（压完 ≤ ${fmtBytes(MEDIA_IMG_MAX_BYTES)}）。还能加 ${left} 张。`;
 }
 
-/** 刷新预览区（图片用 object URL 直接显示） */
-function renderMediaPreview() {
-  const box = $('#media-list');
+/** 刷新某个编辑器的预览区（图片用 object URL 直接显示） @param {string} owner */
+function renderMediaPreview(owner) {
+  const box = $('#' + owner + '-media-list');
   if (!box) return;
-  box.innerHTML = pendingMedia.map((m, i) => `
+  box.innerHTML = pendingOf(owner).map((m, i) => `
     <div class="media-chip">
       <img src="${esc(m.previewUrl)}" alt="">
       <span class="media-chip-kind">图片</span>
       <span class="media-chip-size">${fmtBytes(m.size)}</span>
-      <button type="button" class="media-chip-del" data-action="media-remove" data-i="${i}"
-              title="移除">×</button>
+      <button type="button" class="media-chip-del" data-action="media-remove"
+              data-owner="${esc(owner)}" data-i="${i}" title="移除">×</button>
     </div>`).join('');
 }
 
 /**
- * 把 pendingMedia 传到 Storage，返回可直接写进 attachments 表的数据。
+ * 把某个编辑器里待上传的图片传到 Storage，返回可直接写进 attachments 表的数据。
  * 路径：`<我的 user_id>/<随机 id>.<扩展名>`（第一段是 user_id，Storage 的 RLS 靠它）。
+ * @param {string} owner
  * @returns {Promise<{items: {kind: string, url: string, mime: string, bytes: number}[],
  *                    paths: string[], failed: number}>}
  */
-async function uploadPendingMedia() {
+async function uploadPendingMedia(owner) {
   const items = [], paths = [];
   let failed = 0;
-  for (let i = 0; i < pendingMedia.length; i++) {
-    const m = pendingMedia[i];
+  const list = pendingOf(owner);
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
     const path = `${me.id}/${newMediaId()}.${mediaExt(m.blob, m.name)}`;
     try {
       const up = await sb.storage.from(MEDIA_BUCKET).upload(path, m.blob, {
@@ -2375,7 +2406,7 @@ async function removeUploadedMedia(paths) {
  * 校验附件 URL：只认我们自己 media 桶下的公开地址。
  * ⚠️ 这是**渲染前**必须过的一道：attachments.url 是用户可控的字符串，
  *    直接塞进 <img src> 就等于让别人能往页面上挂任意资源
- *    （javascript: 在 img 上还好，外站追踪像素、data: 大图、换成 <video> 就难说了）。
+ *    （javascript: 在 img 上还好，外站追踪像素、data: 大图就说不好了）。
  *    和 safeAvatarUrl 同一个思路：白名单前缀 + 扩展名。
  * @param {unknown} url
  * @param {'image'|'video'} kind
@@ -2400,7 +2431,7 @@ function safeMediaUrl(url, kind) {
  *
  * ⚠️ 两类走两道不同的白名单，都很重要：
  *    · 图片：只画我们 media 桶下的地址（safeMediaUrl）—— 否则谁都能塞一行
- *      外站地址，让所有看过这条问题的人都往他家服务器发一次请求
+ *      外站地址，让所有看过这条内容的人都往他家服务器发一次请求
  *    · 视频：只收 http/https 的链接，而且**只当外链画**（不带 iframe）。
  *      嵌 iframe 的话，每看一次页面就把访问者的 IP / UA 送给第三方；
  *      卡片上把域名亮出来，点之前就知道要去哪。
@@ -2450,26 +2481,28 @@ function closeLightbox() {
 }
 
 /**
- * 编辑器里那一块「图片」「视频链接」的 UI。提问页和回答框共用。
+ * 编辑器里那一块「图片」「视频链接」的 UI。提问页、回答框、**每条回复框**共用。
  * ⚠️ 用 label 包住隐藏的 file input：这样点一下就打开选择框，不用额外 JS；
  *    拖拽和粘贴另外接（见 document 上的 dragover / paste 监听）。
- * @param {string} idPrefix 同一页可能有多个编辑器（详情页有回答框），前缀区分
+ * ⚠️ 所有 id 都带 `owner` 前缀：详情页上一页可能有十几个编辑器（每条回复一个），
+ *    共用 `#media-list` 的话预览会画到别人家去。
+ * @param {string} owner 编辑器前缀（'ask' / 'ans' / 'rep-<回答 id>'）
  * @returns {string}
  */
-function mediaFieldHtml(idPrefix) {
+function mediaFieldHtml(owner) {
   return `<div class="media-field">
     <label class="field">
       <span class="field-label">图片（可选）</span>
-      <div class="media-drop" data-drop="${idPrefix}">
+      <div class="media-drop" data-drop="${esc(owner)}">
         <label class="media-pick">
-          <input type="file" id="${idPrefix}-media-file"
+          <input type="file" id="${esc(owner)}-media-file" data-owner="${esc(owner)}"
                  accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <span class="btn btn-soft btn-sm">选择图片</span>
         </label>
         <span class="faint">也可以把图片拖进来，或直接粘贴截图</span>
       </div>
-      <div class="media-list" id="media-list"></div>
-      <p class="hint" id="media-hint">${mediaHintText()}</p>
+      <div class="media-list" id="${esc(owner)}-media-list"></div>
+      <p class="hint" id="${esc(owner)}-media-hint">${mediaHintText(owner)}</p>
     </label>
 
     <label class="field">
@@ -2484,7 +2517,7 @@ function mediaFieldHtml(idPrefix) {
 }
 
 /**
- * 「先传图片 → 再建帖 → 最后挂附件」的公共流程（提问和回答共用）。
+ * 「先传图片 → 再建帖 → 最后挂附件」的公共流程（提问 / 回答 / 回复共用）。
  *
  * 视频走的是**链接**，不经过 Storage：所以这里只上传图片，
  * 链接以 kind='video' 的一行一起写进 attachments（数据库那条 check 约束
@@ -2495,13 +2528,14 @@ function mediaFieldHtml(idPrefix) {
  *     然后把错误原样抛出去（调用点照旧 toast「发布失败」）
  *   · 挂附件失败 → 帖子已经建好了，不该因为这一句就说"发布失败"：
  *     内容是真的发出去了，只提示"有附件没挂上"，页面照常打开
+ * @param {string} owner 用哪个编辑器的待上传列表
  * @param {string|null} videoUrl 已经校验过的视频链接（null = 没有）
  * @param {() => Promise<string>} createPost 建帖，返回新帖 id
  * @param {(id: string, items: {kind:string,url:string,mime:string,bytes:number}[]) => Promise<void>} attach
  * @returns {Promise<string>} 新帖 id
  */
-async function publishWithMedia(videoUrl, createPost, attach) {
-  const { items, paths, failed } = await uploadPendingMedia();
+async function publishWithMedia(owner, videoUrl, createPost, attach) {
+  const { items, paths, failed } = await uploadPendingMedia(owner);
   if (failed) toast(`${failed} 张图没传上去，其余的照常带上`);
   if (videoUrl) items.push({ kind: 'video', url: videoUrl, mime: '', bytes: 0 });
 
@@ -2521,7 +2555,7 @@ async function publishWithMedia(videoUrl, createPost, attach) {
       toast('内容发出去了，但有附件没能挂上');
     }
   }
-  resetPendingMedia();
+  resetPendingMedia(owner);
   return id;
 }
 
@@ -3756,13 +3790,23 @@ function replyZone(a, replies, q) {
   /* 回复框：登录才有。data-to 是"回复谁"的用户 id，为空表示直接回复这条回答
      （数据库会把通知发给回答作者，见 notify_on_reply 的 coalesce）。 */
   const to = target && target.userId ? target.userId : '';
+  /* 回复也能贴图片 / 视频链接（答案本来就是同一张表的一行，附件挂上去
+     数据库那套规则完全一样）。但附件区**默认收起** —— 一条回答下面可能挂着
+     好几条回复，每条都摊开一个文件选择器会把评论区弄得又长又吵。 */
+  const mediaOwner = 'rep-' + a.id;
   const form = me ? `
-    <form class="reply-form" data-q="${q.id}" data-parent="${a.id}" data-to="${esc(to)}">
+    <form class="reply-form" data-q="${q.id}" data-parent="${a.id}" data-to="${esc(to)}"
+          data-owner="${esc(mediaOwner)}">
       ${target ? `<div class="reply-hint">回复 <b>@${esc(target.name)}</b>：
         <button type="button" class="linkbtn" data-action="reply-cancel">取消</button></div>` : ''}
       <textarea name="body" rows="2" required
         placeholder="${target ? `回复 @${esc(target.name)}…` : `回复 ${esc(a.author.name)} 的这条回答…`}"></textarea>
-      <button class="btn btn-soft btn-sm" type="submit">发布回复</button>
+      <div class="reply-foot">
+        <button class="btn btn-soft btn-sm" type="submit">发布回复</button>
+        <button type="button" class="linkbtn" data-action="media-toggle"
+                data-owner="${esc(mediaOwner)}">＋ 图片 / 视频链接</button>
+      </div>
+      <div class="hidden" id="media-slot-${esc(mediaOwner)}">${mediaFieldHtml(mediaOwner)}</div>
     </form>` : '';
 
   return `<div class="replies">${toggle}${list}${form}</div>`;
@@ -3771,9 +3815,9 @@ function replyZone(a, replies, q) {
 /* ------------------------------ 页面：详情 ------------------------------ */
 /** @param {QuestionDetail|null} q */
 function renderDetail(q) {
-  /* 新开一个详情页 = 一个新编辑器：把上一次没发出去的附件清掉
-     （用户可能在别的帖子下选好了图又跳过来）。 */
-  resetPendingMedia();
+  /* 新开一个详情页 = 一批新编辑器（回答框 + 每条回复框）：
+     把上一页没发出去的附件全清掉。 */
+  resetAllPendingMedia();
   if (!q) {
     $('#app').innerHTML = `
       <div class="empty">
@@ -3930,7 +3974,7 @@ function renderAsk() {
     .map(([t]) => `<button type="button" class="tag" data-action="fill-tag" data-tag="${esc(t)}">${esc(t)}</button>`)
     .join('');
 
-  resetPendingMedia();   // 新开一个编辑器：上一次没发出去的附件不能跟过来
+  resetPendingMedia('ask');   // 新开一个编辑器：上一次没发出去的附件不能跟过来
 
   $('#app').innerHTML = `
     <a class="back" href="#/">← 回到问题列表</a>
@@ -4043,13 +4087,28 @@ document.addEventListener('click', async e => {
          这三个都挂在**任意位置**的元素上（预览条、正文里的图、灯箱本身），
          所以不用管它们在不在某个容器里。 */
       case 'media-remove': {
+        const owner = el.dataset.owner || '';
         const i = Number(el.dataset.i);
-        const m = pendingMedia[i];
+        const items = pendingOf(owner);
+        const m = items[i];
         if (m) { try { URL.revokeObjectURL(m.previewUrl); } catch (_) { /* 忽略 */ } }
-        pendingMedia.splice(i, 1);
-        renderMediaPreview();
-        const hint = $('#media-hint');
-        if (hint) hint.textContent = mediaHintText();
+        items.splice(i, 1);
+        renderMediaPreview(owner);
+        const hint = $('#' + owner + '-media-hint');
+        if (hint) hint.textContent = mediaHintText(owner);
+        break;
+      }
+
+      case 'media-toggle': {
+        /* 回复框里的「＋ 图片 / 视频链接」：默认收起。
+           原因很直白：一条回答下面可能挂着好几条回复，每条都摊开一个文件选择器
+           会把评论区弄得又长又吵（回复里贴图本来就是偶发需求）。 */
+        const owner = el.dataset.owner || '';
+        const box = $('#media-slot-' + owner);
+        if (box) {
+          const hidden = box.classList.toggle('hidden');
+          el.textContent = hidden ? '＋ 图片 / 视频链接' : '收起附件';
+        }
         break;
       }
 
@@ -4747,12 +4806,14 @@ document.addEventListener('change', async e => {
     if (file) await uploadAvatar(file);
   }
 
-  /* 提问 / 回答里加图片、视频：只收进待上传列表（发帖时才真的传） */
-  if (t.id === 'ask-media-file' || t.id === 'ans-media-file') {
+  /* 提问 / 回答 / 回复里加图片：只收进**那个编辑器**的待上传列表
+     （发帖时才真的传）。owner 从 data-owner 读 —— 详情页上有十几个编辑器，
+     不能靠 id 硬编码认。 */
+  if (t.dataset && t.dataset.owner) {
     const input = /** @type {HTMLInputElement} */ (t);
     const files = input.files ? [...input.files] : [];
     input.value = '';                          // 允许重复选同一个文件
-    await addPendingMedia(files);
+    await addPendingMedia(t.dataset.owner, files);
   }
 });
 
@@ -4797,16 +4858,34 @@ document.addEventListener('drop', async e => {
   e.preventDefault();
   zone.classList.remove('is-over');
   const dt = /** @type {DragEvent} */ (e).dataTransfer;
-  await addPendingMedia(dt ? [...dt.files] : []);
+  const owner = /** @type {HTMLElement} */ (zone).dataset.drop || '';
+  await addPendingMedia(owner, dt ? [...dt.files] : []);
+});
+
+/* 粘的是哪张图 → 放进**哪个**编辑器？
+   详情页上有十几个编辑器（回答框 + 每条回复框），所以得知道焦点在哪。
+   这里记住"最后聚焦过的那个编辑器"，粘贴时用它：
+     · 在正文输入框里聚焦过 → 就是它
+     · 直接点「选择图片」也能用（那条路走 change 事件，不依赖这个变量）
+   一个都没聚焦过就不接管 —— 宁可不知道往哪贴，也不要贴错地方。 */
+let lastMediaOwner = '';
+document.addEventListener('focusin', e => {
+  const t = /** @type {HTMLElement} */ (e.target);
+  const form = t && t.closest ? t.closest('form') : null;
+  if (!form) return;
+  const field = /** @type {HTMLElement|null} */ (form.querySelector('[data-drop]'));
+  if (field) lastMediaOwner = field.dataset.drop || '';
 });
 
 document.addEventListener('paste', async e => {
   const cd = /** @type {ClipboardEvent} */ (e).clipboardData;
   const files = cd ? [...cd.files] : [];
   if (!files.length) return;                       // 普通文字粘贴：一点都别碰
-  if (!$('#media-list')) return;                   // 当前页面没有编辑器
+  if (!lastMediaOwner || !$('#' + lastMediaOwner + '-media-list')) return;
   e.preventDefault();
-  await addPendingMedia(files);
+  const box = $('#media-slot-' + lastMediaOwner);
+  if (box) box.classList.remove('hidden');         // 回复框里默认是收起的，自动展开
+  await addPendingMedia(lastMediaOwner, files);
 });
 
 /* ------------------------------ 表单提交 ------------------------------ */
@@ -5057,7 +5136,7 @@ document.addEventListener('submit', async e => {
       /* 图片先传文件、再建问题、最后挂上去（见 publishWithMedia 的注释）。
          上传可能要好几秒，所以按钮在 await 期间一直是"发布中…"。 */
       const id = await publishWithMedia(
-        videoUrl,
+        'ask', videoUrl,
         () => api.createQuestion({ title, body, tags }),
         (qid, items) => api.addAttachments(items, { questionId: qid }));
       lastViewedId = null;
@@ -5090,7 +5169,7 @@ document.addEventListener('submit', async e => {
     btn.disabled = true; btn.textContent = '发布中…';
     try {
       await publishWithMedia(
-        videoUrl,
+        'ans', videoUrl,
         () => api.addAnswer(form.dataset.q, body),
         (aid, items) => api.addAttachments(items, { answerId: aid }));
       form.reset();
@@ -5115,11 +5194,23 @@ document.addEventListener('submit', async e => {
     const parentId = form.dataset.parent;
     /* data-to 为空串 = 直接回复这条回答（通知发给回答作者，由触发器兜底） */
     const to = form.dataset.to || null;
+    const owner = form.dataset.owner || ('rep-' + parentId);
+
+    /* 视频链接填了就必须是个网址；校验放在上传之前（别等传完图才说链接写错了） */
+    const linkRaw = String(new FormData(form).get('video_link') || '').trim();
+    const videoUrl = linkRaw ? parseVideoLink(linkRaw) : null;
+    if (linkRaw && !videoUrl) {
+      toast('视频链接要是一个网址（http:// 或 https:// 开头）');
+      return;
+    }
 
     const btn = /** @type {HTMLButtonElement} */ (form.querySelector('button[type=submit]'));
     btn.disabled = true; btn.textContent = '发布中…';
     try {
-      await api.addReply(form.dataset.q, parentId, to, body);
+      await publishWithMedia(
+        owner, videoUrl,
+        () => api.addReply(form.dataset.q, parentId, to, body),
+        (aid, items) => api.addAttachments(items, { answerId: aid }));
       form.reset();
       replyTarget = null;
       /* 刚发出去的回复必须让人看见：否则它躺在**收起的**列表里，

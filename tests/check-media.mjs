@@ -354,14 +354,14 @@ try {
       await waitFor(async () => (await s.txt('#toast')).includes('贴链接'), 8000);
       check('★★ 选视频文件时提示"请贴链接，别上传"（而不是让它去撞桶的类型限制）',
         (await s.txt('#toast')).includes('贴链接'), await s.txt('#toast'));
-      check('被拒之后待上传列表仍然为空', (await s.count('#media-list .media-chip')) === 0);
+      check('被拒之后待上传列表仍然为空', (await s.count('#ask-media-list .media-chip')) === 0);
 
       /* 6.3 正常选一张图：预览出现 */
       await s.uploadFile(pngPath, '#ask-media-file');
-      await waitFor(async () => (await s.count('#media-list .media-chip')) === 1, 15000);
-      check('★ 选了图片之后出现预览缩略图', (await s.count('#media-list .media-chip')) === 1);
+      await waitFor(async () => (await s.count('#ask-media-list .media-chip')) === 1, 15000);
+      check('★ 选了图片之后出现预览缩略图', (await s.count('#ask-media-list .media-chip')) === 1);
       check('预览里有"移除"按钮（选错了能撤）',
-        (await s.count('#media-list [data-action="media-remove"]')) === 1);
+        (await s.count('#ask-media-list [data-action="media-remove"]')) === 1);
 
       /* 6.4 链接填错：当场拦，不开始上传 */
       const title = `【附件测试】${stamp} 带图和视频链接的问题`;
@@ -411,7 +411,103 @@ try {
       check('★ 回答框里也有「视频链接」输入框',
         (await s.count('#answer-form [name=video_link]')) === 1);
 
-      /* 收尾：把这条问题删掉（连同它的回答 / 附件行） */
+      /* 6.8 ★ 回复框也能贴图贴链接（回复是 answers 表里 parent_id 非空的行，
+             附件那一套规则完全一样，数据库层面本来就允许 —— 缺的只是界面入口） */
+      await s.setField('#answer-form', 'body', `【附件测试】${stamp} 用来挂回复的回答`);
+      await s.submit('#answer-form');
+      await waitFor(async () => (await s.count('.reply-form')) >= 1, 30000);
+      check('发了一条回答，下面出现了回复框', (await s.count('.reply-form')) >= 1);
+
+      const repOwner = await s.ev(
+        `(() => { const f = document.querySelector('.reply-form'); return f ? f.dataset.owner : ''; })()`);
+      check('回复框有自己的编辑器 id（不是跟回答框共用一套）',
+        /^rep-[0-9a-f-]{36}$/.test(String(repOwner)), String(repOwner));
+
+      /* 附件区默认收起 —— 一条回答下可能挂着好几条回复，都摊开太吵 */
+      check('★ 回复框的附件区默认是收起的',
+        await s.ev(`document.querySelector('#media-slot-${repOwner}').classList.contains('hidden')`));
+      await s.ev(`document.querySelector('.reply-form [data-action="media-toggle"]').click()`);
+      await waitFor(async () =>
+        !(await s.ev(`document.querySelector('#media-slot-${repOwner}').classList.contains('hidden')`)), 8000);
+      check('点「＋ 图片 / 视频链接」能展开',
+        !(await s.ev(`document.querySelector('#media-slot-${repOwner}').classList.contains('hidden')`)));
+
+      await s.uploadFile(pngPath, '#' + repOwner + '-media-file');
+      await waitFor(async () => (await s.count('#' + repOwner + '-media-list .media-chip')) === 1, 15000);
+      check('★ 回复框里选图也有预览（而且只画在自己那个编辑器里）',
+        (await s.count('#' + repOwner + '-media-list .media-chip')) === 1);
+      check('回答框的预览没有被串台（各自一份）',
+        (await s.count('#ans-media-list .media-chip')) === 0);
+
+      await s.setField('.reply-form', 'body', `【附件测试】${stamp} 带图的回复`);
+      await s.setField('.reply-form', 'video_link', VIDEO_URL);
+      await s.submit('.reply-form');
+      const replied = await waitFor(async () =>
+        (await s.txt('#app')).includes(`【附件测试】${stamp} 带图的回复`), 30000);
+      check('★ 带图片 + 视频链接的回复能发出去', replied);
+      check('★ 回复下面能看到图片', (await s.count('.reply .media-item img')) >= 1);
+      check('★ 回复下面能看到视频外链卡片', (await s.count('.reply .video-link')) >= 1);
+
+      /* 6.9 ★★ 在**别人的回复**下面接着回复，同样能贴图。
+             先让乙（REST）在甲的这条回答下面留一条回复。 */
+      const answerId = await s.ev(
+        `(() => { const f = document.querySelector('.reply-form'); return f ? f.dataset.parent : ''; })()`);
+      const bReply = await call('POST', '/rest/v1/answers', {
+        token: uB.token,
+        body: {
+          question_id: newQid, author_id: uB.id,
+          body: `【附件测试】${stamp} 乙的回复`, parent_id: answerId,
+          reply_to_user_id: uA.id,
+        },
+      });
+      const bReplyId = Array.isArray(bReply.data) && bReply.data[0] ? bReply.data[0].id : null;
+      check('乙在甲的回答下面留了一条回复（数据库里插的）', !!bReplyId,
+        `HTTP ${bReply.status} ${msg(bReply.data)}`);
+
+      await s.navigate(BASE + '#/q/' + newQid);
+      await waitFor(async () => (await s.txt('#app')).includes('乙的回复'), 20000);
+      /* 展开回复列表，点乙那条回复上的「回复」→ 回复目标变成乙 */
+      await s.ev(`(() => {
+        const t = document.querySelector('[data-action="toggle-replies"]');
+        if (t) t.click();
+      })()`);
+      await waitFor(async () =>
+        (await s.count(`#reply-${bReplyId} [data-action="reply-to"]`)) === 1, 15000);
+      await s.ev(`document.querySelector('#reply-${bReplyId} [data-action="reply-to"]').click()`);
+      await waitFor(async () =>
+        (await s.txt('.reply-hint')).includes('@' + B.nick), 20000);
+      check('★ 点「回复」指向了乙（回复目标是**别人的回复**）',
+        (await s.txt('.reply-hint')).includes('@' + B.nick),
+        await s.txt('.reply-hint'));
+
+      const repOwner2 = await s.ev(
+        `(() => { const f = document.querySelector('.reply-form'); return f ? f.dataset.owner : ''; })()`);
+      await s.ev(`document.querySelector('.reply-form [data-action="media-toggle"]').click()`);
+      await waitFor(async () =>
+        !(await s.ev(`document.querySelector('#media-slot-${repOwner2}').classList.contains('hidden')`)), 8000);
+      await s.uploadFile(pngPath, '#' + repOwner2 + '-media-file');
+      await waitFor(async () => (await s.count('#' + repOwner2 + '-media-list .media-chip')) === 1, 15000);
+      await s.setField('.reply-form', 'body', `【附件测试】${stamp} 在乙的回复下带图回复`);
+      await s.submit('.reply-form');
+      const replied2 = await waitFor(async () =>
+        (await s.txt('#app')).includes(`在乙的回复下带图回复`), 30000);
+      check('★★ 在**别人的回复**下面回复也能贴图并发出', replied2);
+
+      /* 落到数据库里核对：这条新回复挂在甲的回答下、回复对象是乙、附件挂在新回复上 */
+      const deep = await call('GET',
+        `/rest/v1/answers_view?select=id,parent_id,reply_to_user_id,attachments&question_id=eq.${newQid}`
+        + '&body=like.' + encodeURIComponent('*在乙的回复下带图回复*'), { token: uA.token });
+      const deepRow = Array.isArray(deep.data) && deep.data[0];
+      check('★★ 数据库里：新回复的 parent_id 是甲的回答（仍然只有一层）',
+        !!deepRow && deepRow.parent_id === answerId, deepRow ? String(deepRow.parent_id) : '(查不到)');
+      check('★★ 回复对象是乙（回复的是别人的回复）',
+        !!deepRow && deepRow.reply_to_user_id === uB.id, deepRow ? String(deepRow.reply_to_user_id) : '');
+      check('★★ 图片附件挂在这条新回复上（answer_id 指向它，不是指向顶层回答）',
+        !!deepRow && Array.isArray(deepRow.attachments) && deepRow.attachments.length === 1
+        && deepRow.attachments[0].kind === 'image',
+        JSON.stringify(deepRow && deepRow.attachments).slice(0, 160));
+
+      /* 收尾：把这条问题删掉（连同它的回答 / 回复 / 附件行） */
       await s.ev(`api.removeQuestion(${JSON.stringify(newQid)})`);
       const gone = await call('GET', `/rest/v1/questions?select=id&id=eq.${newQid}`, { token: uA.token });
       check('浏览器里发的那条带附件问题已清理（连回答 / 附件一起）',
